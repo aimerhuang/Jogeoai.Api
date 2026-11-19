@@ -1,0 +1,64 @@
+<!doctype html>
+<!-- Synthetic test-only content modeling the reviewed source layout; never live-page proof. -->
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+  </head>
+  <body>
+    <div id="authenticated">Synthetic authorized Qwen account</div>
+    <button
+      id="new"
+      onclick="document.querySelector('#messages').replaceChildren(); document.querySelector('#composer').value = ''"
+    >
+      New conversation
+    </button>
+    <textarea id="composer"></textarea>
+    <div id="conversation-active">Default conversation active; network use unverified</div>
+    <button
+      id="submit"
+      onclick="document.querySelector('#sent-prompt').textContent = document.querySelector('#composer').value; document.querySelector('#messages').innerHTML = document.querySelector('#answer-template').innerHTML"
+    >
+      Send
+    </button>
+    <div id="sent-prompt" hidden></div>
+    <div id="messages"></div>
+    <div id="sources"></div>
+    <template id="answer-template">
+      <article class="assistant message-select-wrapper-answer-fixture">
+        <div class="answer qk-markdown qk-markdown-complete" style="white-space: pre-wrap">
+          Synthetic Qwen answer for fixture testing only.
+        </div>
+        <a class="citation" href="https://example.com/inline-only">Inline citation</a>
+        <a class="citation" href="https://hidden.example.com" hidden>Hidden citation</a>
+        <div
+          class="reference-wrap-iEjeb3"
+          onclick="document.querySelector('#sources').innerHTML = document.querySelector('#source-template').innerHTML"
+        >
+          3篇来源
+        </div>
+      </article>
+    </template>
+    <template id="source-template">
+      <section class="deep-think-source-tyxrYL">
+        <div
+          class="source-item-mqZd08"
+          data-click-extra='{"url":"https://example.com/source","title":" First source title "}'
+        >
+          First source
+        </div>
+        <div
+          class="source-item-mqZd08"
+          data-click-extra='{"url":"https://second.example.com/source","title":"Second source title"}'
+        >
+          Second source
+        </div>
+        <div
+          class="source-item-mqZd08"
+          data-click-extra='{"url":"https://example.com/source","title":"Later duplicate title"}'
+        >
+          Duplicate first source
+        </div>
+      </section>
+    </template>
+  </body>
+</html>

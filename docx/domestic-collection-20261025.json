@@ -1,0 +1,678 @@
+{
+  "roundId": "20261025-1792892628240",
+  "verifiedAt": "2026-10-25T03:29:06.173316+00:00",
+  "platforms": {
+    "doubao": {
+      "run": {
+        "runId": "9112f588-14f4-4a04-bf33-a0b3f4e3c69b",
+        "siteId": "ded1a716-f791-491c-96e2-f737bb998960",
+        "status": "succeeded",
+        "totalChecks": 10,
+        "succeededChecks": 10,
+        "failedChecks": 0,
+        "createdAt": "2026-10-25T01:43:48+00:00",
+        "startedAt": "2026-10-25T01:44:23+00:00",
+        "completedAt": "2026-10-25T01:59:29+00:00",
+        "errorCode": "",
+        "errorMessage": "",
+        "provider": "domestic_collector",
+        "expectedChecks": 10,
+        "collectionCompletedChecks": 10,
+        "analysisStatus": "not_started",
+        "analyzedChecks": 0
+      },
+      "checks": [
+        {
+          "checkId": "c0ac2788-cc11-4cc3-b4d7-1b57bfad96d9",
+          "promptId": "028ad5d9-5bd5-4097-a53b-59305f21ed8f",
+          "answerChars": 1497,
+          "hasMarkdown": true,
+          "citations": 18,
+          "titledCitations": 18,
+          "searchQueries": 3,
+          "queryAvailability": "available",
+          "analysisStatus": "completed"
+        },
+        {
+          "checkId": "b6e944d4-1ec9-4b8d-ad76-205be6880996",
+          "promptId": "0de81940-0cf6-4753-92fa-2add0a21adf1",
+          "answerChars": 1343,
+          "hasMarkdown": true,
+          "citations": 46,
+          "titledCitations": 46,
+          "searchQueries": 8,
+          "queryAvailability": "available",
+          "analysisStatus": "completed"
+        },
+        {
+          "checkId": "2ab6b7b0-6d4d-4c82-8666-361f6c705c59",
+          "promptId": "29501069-0dba-4a4b-9d36-70e921ae2e57",
+          "answerChars": 1764,
+          "hasMarkdown": true,
+          "citations": 38,
+          "titledCitations": 38,
+          "searchQueries": 7,
+          "queryAvailability": "available",
+          "analysisStatus": "completed"
+        },
+        {
+          "checkId": "877d4001-b84f-4759-9209-4039205d98df",
+          "promptId": "480bc6e4-da6d-449c-af3f-27e2fcac3fcc",
+          "answerChars": 1376,
+          "hasMarkdown": true,
+          "citations": 33,
+          "titledCitations": 33,
+          "searchQueries": 6,
+          "queryAvailability": "available",
+          "analysisStatus": "completed"
+        },
+        {
+          "checkId": "18f2c0c2-9e05-4eac-9cde-4afd71735640",
+          "promptId": "4b9dda0f-f01b-4170-8948-bc8e5f92ea31",
+          "answerChars": 1076,
+          "hasMarkdown": true,
+          "citations": 41,
+          "titledCitations": 41,
+          "searchQueries": 7,
+          "queryAvailability": "available",
+          "analysisStatus": "completed"
+        },
+        {
+          "checkId": "54fe261b-ce1c-46a7-9db2-d620b5d7f730",
+          "promptId": "820a0118-ad50-4fad-9d9d-257a492c1b02",
+          "answerChars": 1494,
+          "hasMarkdown": true,
+          "citations": 17,
+          "titledCitations": 17,
+          "searchQueries": 5,
+          "queryAvailability": "available",
+          "analysisStatus": "completed"
+        },
+        {
+          "checkId": "a867620a-dd07-4c48-baba-7413d71f2334",
+          "promptId": "91400724-e821-4523-98ae-6668cc24a5cb",
+          "answerChars": 1760,
+          "hasMarkdown": true,
+          "citations": 47,
+          "titledCitations": 47,
+          "searchQueries": 8,
+          "queryAvailability": "available",
+          "analysisStatus": "completed"
+        },
+        {
+          "checkId": "0ca74ef3-e5ec-4a7e-922a-f00a0340b5d7",
+          "promptId": "acbdfbcc-07c5-4ac6-b714-753a041e25ad",
+          "answerChars": 1421,
+          "hasMarkdown": true,
+          "citations": 35,
+          "titledCitations": 35,
+          "searchQueries": 6,
+          "queryAvailability": "available",
+          "analysisStatus": "completed"
+        },
+        {
+          "checkId": "a7b1bb75-d622-465e-8cf0-51b97f8ec710",
+          "promptId": "b319d9c7-2c16-4287-83d0-d96643fe96d5",
+          "answerChars": 1450,
+          "hasMarkdown": true,
+          "citations": 43,
+          "titledCitations": 43,
+          "searchQueries": 8,
+          "queryAvailability": "available",
+          "analysisStatus": "completed"
+        },
+        {
+          "checkId": "a4432e36-377c-41e0-866e-84ab61a05861",
+          "promptId": "f041504f-7e21-488e-9548-fa61c1dcaa22",
+          "answerChars": 1132,
+          "hasMarkdown": true,
+          "citations": 40,
+          "titledCitations": 40,
+          "searchQueries": 7,
+          "queryAvailability": "available",
+          "analysisStatus": "completed"
+        }
+      ],
+      "totals": {
+        "succeeded": 10,
+        "distinctPrompts": 10,
+        "citations": 358,
+        "titledCitations": 358,
+        "withSearchQueries": 10,
+        "withMarkdown": 10,
+        "analysesCompleted": 10
+      },
+      "taskStatus": [
+        [
+          "succeeded",
+          "1",
+          "10"
+        ]
+      ],
+      "analysisWork": [
+        [
+          "completed",
+          "10"
+        ]
+      ],
+      "submissions": [
+        [
+          "accepted",
+          "10"
+        ]
+      ],
+      "browserAttempts": 10,
+      "browserAttemptsExactlyOnce": true,
+      "monitoringTotalCount": 10,
+      "monitoringMatchesChecks": true,
+      "profileLocked": false,
+      "spoolLocked": false,
+      "pendingEncryptedSubmissions": 0
+    },
+    "ernie": {
+      "run": {
+        "runId": "7c156cb3-7f64-47b3-8a0a-1011eac0727f",
+        "siteId": "ded1a716-f791-491c-96e2-f737bb998960",
+        "status": "succeeded",
+        "totalChecks": 10,
+        "succeededChecks": 10,
+        "failedChecks": 0,
+        "createdAt": "2026-10-25T02:35:58+00:00",
+        "startedAt": "2026-10-25T02:36:21+00:00",
+        "completedAt": "2026-10-25T02:45:31+00:00",
+        "errorCode": "",
+        "errorMessage": "",
+        "provider": "domestic_collector",
+        "expectedChecks": 10,
+        "collectionCompletedChecks": 10,
+        "analysisStatus": "not_started",
+        "analyzedChecks": 0
+      },
+      "checks": [
+        {
+          "checkId": "2f01ad73-d695-48b2-9080-870444e3a55c",
+          "promptId": "028ad5d9-5bd5-4097-a53b-59305f21ed8f",
+          "answerChars": 1438,
+          "hasMarkdown": true,
+          "citations": 26,
+          "titledCitations": 0,
+          "searchQueries": 0,
+          "queryAvailability": "unknown",
+          "analysisStatus": "completed"
+        },
+        {
+          "checkId": "1d250d5e-1457-4f96-9412-f09580ed9208",
+          "promptId": "0de81940-0cf6-4753-92fa-2add0a21adf1",
+          "answerChars": 906,
+          "hasMarkdown": true,
+          "citations": 19,
+          "titledCitations": 0,
+          "searchQueries": 0,
+          "queryAvailability": "unknown",
+          "analysisStatus": "completed"
+        },
+        {
+          "checkId": "88d95af2-a733-40d7-a1d2-7e6fd7d9f136",
+          "promptId": "29501069-0dba-4a4b-9d36-70e921ae2e57",
+          "answerChars": 1480,
+          "hasMarkdown": true,
+          "citations": 25,
+          "titledCitations": 0,
+          "searchQueries": 0,
+          "queryAvailability": "unknown",
+          "analysisStatus": "completed"
+        },
+        {
+          "checkId": "889ac329-0518-49cb-b4bf-ca332acfc3b7",
+          "promptId": "480bc6e4-da6d-449c-af3f-27e2fcac3fcc",
+          "answerChars": 2868,
+          "hasMarkdown": true,
+          "citations": 55,
+          "titledCitations": 0,
+          "searchQueries": 0,
+          "queryAvailability": "unknown",
+          "analysisStatus": "completed"
+        },
+        {
+          "checkId": "f1616d94-d21a-40c4-9971-ff4f0e54e1e9",
+          "promptId": "4b9dda0f-f01b-4170-8948-bc8e5f92ea31",
+          "answerChars": 2766,
+          "hasMarkdown": true,
+          "citations": 43,
+          "titledCitations": 0,
+          "searchQueries": 0,
+          "queryAvailability": "unknown",
+          "analysisStatus": "completed"
+        },
+        {
+          "checkId": "e611a035-b393-4bd5-8d89-9f2d092c5ab6",
+          "promptId": "820a0118-ad50-4fad-9d9d-257a492c1b02",
+          "answerChars": 965,
+          "hasMarkdown": true,
+          "citations": 24,
+          "titledCitations": 0,
+          "searchQueries": 0,
+          "queryAvailability": "unknown",
+          "analysisStatus": "completed"
+        },
+        {
+          "checkId": "e61c4b46-506c-4b1c-a376-67abd97a7b5d",
+          "promptId": "91400724-e821-4523-98ae-6668cc24a5cb",
+          "answerChars": 3048,
+          "hasMarkdown": true,
+          "citations": 56,
+          "titledCitations": 0,
+          "searchQueries": 0,
+          "queryAvailability": "unknown",
+          "analysisStatus": "completed"
+        },
+        {
+          "checkId": "88baee0a-aadf-4a8a-8b8f-5426e6ae690b",
+          "promptId": "acbdfbcc-07c5-4ac6-b714-753a041e25ad",
+          "answerChars": 1066,
+          "hasMarkdown": true,
+          "citations": 35,
+          "titledCitations": 0,
+          "searchQueries": 0,
+          "queryAvailability": "unknown",
+          "analysisStatus": "completed"
+        },
+        {
+          "checkId": "a4df921f-b488-4a7f-af8e-260d6edfd1a6",
+          "promptId": "b319d9c7-2c16-4287-83d0-d96643fe96d5",
+          "answerChars": 1096,
+          "hasMarkdown": true,
+          "citations": 62,
+          "titledCitations": 0,
+          "searchQueries": 0,
+          "queryAvailability": "unknown",
+          "analysisStatus": "completed"
+        },
+        {
+          "checkId": "1274a647-608e-485f-9c7a-7ed270fc03f5",
+          "promptId": "f041504f-7e21-488e-9548-fa61c1dcaa22",
+          "answerChars": 1198,
+          "hasMarkdown": true,
+          "citations": 58,
+          "titledCitations": 0,
+          "searchQueries": 0,
+          "queryAvailability": "unknown",
+          "analysisStatus": "completed"
+        }
+      ],
+      "totals": {
+        "succeeded": 10,
+        "distinctPrompts": 10,
+        "citations": 403,
+        "titledCitations": 0,
+        "withSearchQueries": 0,
+        "withMarkdown": 10,
+        "analysesCompleted": 10
+      },
+      "taskStatus": [
+        [
+          "succeeded",
+          "1",
+          "10"
+        ]
+      ],
+      "analysisWork": [
+        [
+          "completed",
+          "10"
+        ]
+      ],
+      "submissions": [
+        [
+          "accepted",
+          "10"
+        ]
+      ],
+      "browserAttempts": 10,
+      "browserAttemptsExactlyOnce": true,
+      "monitoringTotalCount": 10,
+      "monitoringMatchesChecks": true,
+      "profileLocked": false,
+      "spoolLocked": false,
+      "pendingEncryptedSubmissions": 0
+    },
+    "tencent_yuanbao": {
+      "run": {
+        "runId": "03b96817-c7fa-4331-b9f8-405d4d2c81bc",
+        "siteId": "ded1a716-f791-491c-96e2-f737bb998960",
+        "status": "succeeded",
+        "totalChecks": 10,
+        "succeededChecks": 10,
+        "failedChecks": 0,
+        "createdAt": "2026-10-25T02:46:02+00:00",
+        "startedAt": "2026-10-25T02:46:31+00:00",
+        "completedAt": "2026-10-25T02:56:26+00:00",
+        "errorCode": "",
+        "errorMessage": "",
+        "provider": "domestic_collector",
+        "expectedChecks": 10,
+        "collectionCompletedChecks": 10,
+        "analysisStatus": "not_started",
+        "analyzedChecks": 0
+      },
+      "checks": [
+        {
+          "checkId": "c37679f6-3206-42c8-bea0-2dcfc1567fdf",
+          "promptId": "028ad5d9-5bd5-4097-a53b-59305f21ed8f",
+          "answerChars": 2020,
+          "hasMarkdown": true,
+          "citations": 23,
+          "titledCitations": 23,
+          "searchQueries": 0,
+          "queryAvailability": "unknown",
+          "analysisStatus": "completed"
+        },
+        {
+          "checkId": "8d302437-621e-4c0e-b0b0-816611a7800f",
+          "promptId": "0de81940-0cf6-4753-92fa-2add0a21adf1",
+          "answerChars": 2100,
+          "hasMarkdown": true,
+          "citations": 41,
+          "titledCitations": 41,
+          "searchQueries": 0,
+          "queryAvailability": "unknown",
+          "analysisStatus": "completed"
+        },
+        {
+          "checkId": "9e076ae3-2647-4eac-af76-dfe4fc316998",
+          "promptId": "29501069-0dba-4a4b-9d36-70e921ae2e57",
+          "answerChars": 2634,
+          "hasMarkdown": true,
+          "citations": 34,
+          "titledCitations": 34,
+          "searchQueries": 0,
+          "queryAvailability": "unknown",
+          "analysisStatus": "completed"
+        },
+        {
+          "checkId": "15f2d013-bd59-4d5a-984e-f048d02d1280",
+          "promptId": "480bc6e4-da6d-449c-af3f-27e2fcac3fcc",
+          "answerChars": 1791,
+          "hasMarkdown": true,
+          "citations": 22,
+          "titledCitations": 22,
+          "searchQueries": 0,
+          "queryAvailability": "unknown",
+          "analysisStatus": "completed"
+        },
+        {
+          "checkId": "3d20e665-8cca-492d-ad28-cadd12f80954",
+          "promptId": "4b9dda0f-f01b-4170-8948-bc8e5f92ea31",
+          "answerChars": 1479,
+          "hasMarkdown": true,
+          "citations": 21,
+          "titledCitations": 21,
+          "searchQueries": 0,
+          "queryAvailability": "unknown",
+          "analysisStatus": "completed"
+        },
+        {
+          "checkId": "c2e0072e-384d-4bd2-bc98-e82375a22487",
+          "promptId": "820a0118-ad50-4fad-9d9d-257a492c1b02",
+          "answerChars": 1943,
+          "hasMarkdown": true,
+          "citations": 44,
+          "titledCitations": 44,
+          "searchQueries": 0,
+          "queryAvailability": "unknown",
+          "analysisStatus": "completed"
+        },
+        {
+          "checkId": "452ab57f-d0e4-426a-94fe-9c946d2d577c",
+          "promptId": "91400724-e821-4523-98ae-6668cc24a5cb",
+          "answerChars": 2011,
+          "hasMarkdown": true,
+          "citations": 29,
+          "titledCitations": 29,
+          "searchQueries": 0,
+          "queryAvailability": "unknown",
+          "analysisStatus": "completed"
+        },
+        {
+          "checkId": "0406eb0f-2a31-45c3-aa8d-5b6b6c280318",
+          "promptId": "acbdfbcc-07c5-4ac6-b714-753a041e25ad",
+          "answerChars": 1457,
+          "hasMarkdown": true,
+          "citations": 20,
+          "titledCitations": 20,
+          "searchQueries": 0,
+          "queryAvailability": "unknown",
+          "analysisStatus": "completed"
+        },
+        {
+          "checkId": "b3466a8b-e48b-438b-8cf1-65601e62fd0c",
+          "promptId": "b319d9c7-2c16-4287-83d0-d96643fe96d5",
+          "answerChars": 2154,
+          "hasMarkdown": true,
+          "citations": 16,
+          "titledCitations": 16,
+          "searchQueries": 0,
+          "queryAvailability": "unknown",
+          "analysisStatus": "completed"
+        },
+        {
+          "checkId": "08eab7fa-bed7-4775-910e-99cc2242550e",
+          "promptId": "f041504f-7e21-488e-9548-fa61c1dcaa22",
+          "answerChars": 1978,
+          "hasMarkdown": true,
+          "citations": 28,
+          "titledCitations": 28,
+          "searchQueries": 0,
+          "queryAvailability": "unknown",
+          "analysisStatus": "completed"
+        }
+      ],
+      "totals": {
+        "succeeded": 10,
+        "distinctPrompts": 10,
+        "citations": 278,
+        "titledCitations": 278,
+        "withSearchQueries": 0,
+        "withMarkdown": 10,
+        "analysesCompleted": 10
+      },
+      "taskStatus": [
+        [
+          "succeeded",
+          "1",
+          "10"
+        ]
+      ],
+      "analysisWork": [
+        [
+          "completed",
+          "10"
+        ]
+      ],
+      "submissions": [
+        [
+          "accepted",
+          "10"
+        ]
+      ],
+      "browserAttempts": 10,
+      "browserAttemptsExactlyOnce": true,
+      "monitoringTotalCount": 10,
+      "monitoringMatchesChecks": true,
+      "profileLocked": false,
+      "spoolLocked": false,
+      "pendingEncryptedSubmissions": 0
+    },
+    "qwen": {
+      "run": {
+        "runId": "2eb26e7c-e7c6-411d-91d6-4db7df619340",
+        "siteId": "ded1a716-f791-491c-96e2-f737bb998960",
+        "status": "running",
+        "totalChecks": 10,
+        "succeededChecks": 6,
+        "failedChecks": 0,
+        "createdAt": "2026-10-25T02:56:56+00:00",
+        "startedAt": "2026-10-25T02:57:18+00:00",
+        "completedAt": null,
+        "errorCode": "",
+        "errorMessage": "",
+        "provider": "domestic_collector",
+        "expectedChecks": 10,
+        "collectionCompletedChecks": 6,
+        "analysisStatus": "not_started",
+        "analyzedChecks": 0
+      },
+      "checks": [
+        {
+          "checkId": "11cbab04-1e29-4997-8465-0069388f0f1d",
+          "promptId": "028ad5d9-5bd5-4097-a53b-59305f21ed8f",
+          "answerChars": 1331,
+          "hasMarkdown": true,
+          "citations": 18,
+          "titledCitations": 18,
+          "searchQueries": 0,
+          "queryAvailability": "unknown",
+          "analysisStatus": "completed"
+        },
+        {
+          "checkId": "0f861710-e9a5-4ea5-930f-e2a9bd0ae7a5",
+          "promptId": "0de81940-0cf6-4753-92fa-2add0a21adf1",
+          "answerChars": 1316,
+          "hasMarkdown": false,
+          "citations": 27,
+          "titledCitations": 27,
+          "searchQueries": 0,
+          "queryAvailability": "unknown",
+          "analysisStatus": "completed"
+        },
+        {
+          "checkId": "0074df03-7f7f-451c-a13b-90def9175460",
+          "promptId": "29501069-0dba-4a4b-9d36-70e921ae2e57",
+          "answerChars": 1644,
+          "hasMarkdown": false,
+          "citations": 18,
+          "titledCitations": 18,
+          "searchQueries": 0,
+          "queryAvailability": "unknown",
+          "analysisStatus": "completed"
+        },
+        {
+          "checkId": "5373fb53-8d1b-4ae3-a88f-d7358cdf4e85",
+          "promptId": "480bc6e4-da6d-449c-af3f-27e2fcac3fcc",
+          "answerChars": 24,
+          "hasMarkdown": false,
+          "citations": 0,
+          "titledCitations": 0,
+          "searchQueries": 0,
+          "queryAvailability": "unknown",
+          "analysisStatus": "completed"
+        },
+        {
+          "checkId": "8264ddef-fe8c-4085-a5e5-329c931fa672",
+          "promptId": "4b9dda0f-f01b-4170-8948-bc8e5f92ea31",
+          "answerChars": 24,
+          "hasMarkdown": false,
+          "citations": 0,
+          "titledCitations": 0,
+          "searchQueries": 0,
+          "queryAvailability": "unknown",
+          "analysisStatus": "completed"
+        },
+        {
+          "checkId": "77277402-b725-4dd7-877b-f7d53794e3ba",
+          "promptId": "820a0118-ad50-4fad-9d9d-257a492c1b02",
+          "answerChars": 24,
+          "hasMarkdown": false,
+          "citations": 0,
+          "titledCitations": 0,
+          "searchQueries": 0,
+          "queryAvailability": "unknown",
+          "analysisStatus": "completed"
+        }
+      ],
+      "totals": {
+        "succeeded": 6,
+        "distinctPrompts": 6,
+        "citations": 63,
+        "titledCitations": 63,
+        "withSearchQueries": 0,
+        "withMarkdown": 1,
+        "analysesCompleted": 6
+      },
+      "taskStatus": [
+        [
+          "pending",
+          "0",
+          "3"
+        ],
+        [
+          "succeeded",
+          "1",
+          "6"
+        ],
+        [
+          "collecting",
+          "1",
+          "1"
+        ]
+      ],
+      "analysisWork": [
+        [
+          "completed",
+          "6"
+        ]
+      ],
+      "submissions": [
+        [
+          "accepted",
+          "6"
+        ]
+      ],
+      "browserAttempts": 7,
+      "browserAttemptsExactlyOnce": false,
+      "monitoringTotalCount": 6,
+      "monitoringMatchesChecks": true,
+      "profileLocked": false,
+      "spoolLocked": false,
+      "pendingEncryptedSubmissions": 0,
+      "responseQuality": {
+        "substantiveResponses": 3,
+        "shortRefusals": [
+          {
+            "checkId": "5373fb53-8d1b-4ae3-a88f-d7358cdf4e85",
+            "answerChars": 24,
+            "citations": 0,
+            "answerSha256": "a97032372e91a833020f5b84c61fc95fd6f109c02baead146c3395cc97ee7357"
+          },
+          {
+            "checkId": "8264ddef-fe8c-4085-a5e5-329c931fa672",
+            "answerChars": 24,
+            "citations": 0,
+            "answerSha256": "a97032372e91a833020f5b84c61fc95fd6f109c02baead146c3395cc97ee7357"
+          },
+          {
+            "checkId": "77277402-b725-4dd7-877b-f7d53794e3ba",
+            "answerChars": 24,
+            "citations": 0,
+            "answerSha256": "a97032372e91a833020f5b84c61fc95fd6f109c02baead146c3395cc97ee7357"
+          }
+        ],
+        "allShortRefusalsSameText": true
+      },
+      "browserAttemptDistinctTasks": 7,
+      "browserAttemptMaxPerTask": 1,
+      "operatorDecision": {
+        "action": "skip_remaining",
+        "remainingUnsubmittedChecks": 4,
+        "activeCollectionProcess": false,
+        "lastInterruptedTaskId": "7f798b3b-262c-4b88-8a7e-1e786d66b5bf",
+        "lastInterruptedTaskSendState": "not_confirmed",
+        "note": "用户要求跳过千问；未取消或改写控制面任务。第 7 题已有一次账本预留且没有提交，未来恢复前须先只读确认是否发送。"
+      }
+    }
+  },
+  "otherPlatformDecisions": {
+    "deepseek": "skipped_by_user_no_new_run",
+    "qingyan": "blocked_by_four_previous_tasks_no_new_run"
+  }
+}

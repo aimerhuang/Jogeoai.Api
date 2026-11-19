@@ -1,0 +1,17 @@
+# MySQL 8.4 with the Jogeoai migrations baked in. Build context: repository root.
+# The official entrypoint runs /docker-entrypoint-initdb.d/* in file-name order,
+# ONLY when the data volume is empty (first start). rollback/ scripts are not copied.
+FROM mysql:8.4
+
+# The mysql client used by the entrypoint defaults to latin1, which breaks migrations that
+# use utf8mb4 collations (043 fails). Force utf8mb4 for every client in this image.
+RUN printf '[client]\ndefault-character-set=utf8mb4\n[mysql]\ndefault-character-set=utf8mb4\n' \
+    > /etc/mysql/conf.d/jogeoai-client.cnf
+
+COPY db/migrations/*.sql /docker-entrypoint-initdb.d/
+
+# Runs after every migration (file-name order: 9 sorts after 0). If any migration fails the
+# entrypoint stops before this, the marker is never written and the compose healthcheck
+# (which requires it) never passes, so api and worker never start on a half-migrated schema.
+RUN printf 'touch /var/lib/mysql/.jogeoai-initdb-complete\n' \
+    > /docker-entrypoint-initdb.d/999-jogeoai-initdb-complete.sh

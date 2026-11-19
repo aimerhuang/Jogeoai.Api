@@ -1,0 +1,9 @@
+.trellis
+.agents
+.claude
+.codex
+AGENTS.md
+node_modules
+dist
+coverage
+pnpm-lock.yaml

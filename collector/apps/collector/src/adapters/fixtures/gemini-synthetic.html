@@ -1,0 +1,30 @@
+<!doctype html>
+<!-- Synthetic test-only DOM. These are NOT observed Gemini selectors. -->
+<html lang="zh-CN">
+  <body>
+    <div id="authenticated">Fixture account</div>
+    <button
+      id="new"
+      onclick="document.querySelector('#messages').replaceChildren(); document.querySelector('#composer').value = ''"
+    >
+      New conversation
+    </button>
+    <textarea id="composer"></textarea>
+    <div id="conversation-active">Default conversation active; grounding use unverified</div>
+    <button
+      id="submit"
+      onclick="document.querySelector('#messages').innerHTML = document.querySelector('#answer-template').innerHTML"
+    >
+      Send
+    </button>
+    <div id="messages"></div>
+    <template id="answer-template">
+      <article class="assistant">
+        <div class="answer">Synthetic Gemini answer for fixture testing only.</div>
+        <a class="citation" href="https://example.com/gemini-source">Source</a>
+        <a class="citation" href="https://gemini.google.com/app">Internal</a>
+        <span class="complete">Complete</span>
+      </article>
+    </template>
+  </body>
+</html>

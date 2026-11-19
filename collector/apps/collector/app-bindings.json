@@ -1,0 +1,146 @@
+{
+  "version": 1,
+  "devices": [
+    {
+      "id": "AI_Apps_4KB",
+      "androidVersion": "15",
+      "abi": "arm64-v8a",
+      "pageSize": "4k",
+      "locale": "zh-Hans-CN",
+      "timezone": "Asia/Shanghai"
+    },
+    {
+      "id": "AI_Apps_4KB_2",
+      "androidVersion": "15",
+      "abi": "arm64-v8a",
+      "pageSize": "4k",
+      "locale": "zh-Hans-CN",
+      "timezone": "Asia/Shanghai"
+    }
+  ],
+  "platforms": {
+    "doubao": {
+      "package": "com.larus.nova"
+    },
+    "ernie": {
+      "package": "com.baidu.newapp"
+    },
+    "zhipu_qingyan": {
+      "package": "com.zhipuai.qingyan"
+    },
+    "qwen": {
+      "package": "com.aliyun.tongyi"
+    },
+    "kimi": {
+      "package": "com.moonshot.kimichat"
+    },
+    "deepseek": {
+      "package": "com.deepseek.chat"
+    },
+    "tencent_yuanbao": {
+      "package": "com.tencent.hunyuan.app.chat"
+    }
+  },
+  "bindings": [
+    {
+      "device": "AI_Apps_4KB",
+      "platform": "doubao",
+      "reviewedAppVersion": "15.7.0",
+      "accountLabel": "doubao-a",
+      "enabled": true
+    },
+    {
+      "device": "AI_Apps_4KB",
+      "platform": "ernie",
+      "reviewedAppVersion": "5.22.0.10",
+      "accountLabel": "ernie-a",
+      "enabled": false,
+      "disabledReason": "Stage 0 (research/driver-spike.md, 2026-11-15): the chat content is rendered in the app's own WebView and is not exposed in the accessibility hierarchy, so neither approved read method works."
+    },
+    {
+      "device": "AI_Apps_4KB",
+      "platform": "zhipu_qingyan",
+      "reviewedAppVersion": "3.8.7",
+      "accountLabel": "zhipu-a",
+      "enabled": true
+    },
+    {
+      "device": "AI_Apps_4KB",
+      "platform": "qwen",
+      "reviewedAppVersion": "7.6.5.3101",
+      "accountLabel": "qwen-a",
+      "enabled": true
+    },
+    {
+      "device": "AI_Apps_4KB",
+      "platform": "kimi",
+      "reviewedAppVersion": "3.1.8",
+      "accountLabel": "kimi-a",
+      "enabled": true
+    },
+    {
+      "device": "AI_Apps_4KB",
+      "platform": "deepseek",
+      "reviewedAppVersion": "2.8.0",
+      "accountLabel": "deepseek-a",
+      "enabled": true
+    },
+    {
+      "device": "AI_Apps_4KB",
+      "platform": "tencent_yuanbao",
+      "reviewedAppVersion": "2.92.0",
+      "accountLabel": "yuanbao-a",
+      "enabled": true
+    },
+    {
+      "device": "AI_Apps_4KB_2",
+      "platform": "doubao",
+      "reviewedAppVersion": "15.7.0",
+      "accountLabel": "doubao-b",
+      "enabled": true
+    },
+    {
+      "device": "AI_Apps_4KB_2",
+      "platform": "ernie",
+      "reviewedAppVersion": "5.22.0.10",
+      "accountLabel": "ernie-b",
+      "enabled": false,
+      "disabledReason": "Stage 0 (research/driver-spike.md, 2026-11-15): the chat content is rendered in the app's own WebView and is not exposed in the accessibility hierarchy, so neither approved read method works."
+    },
+    {
+      "device": "AI_Apps_4KB_2",
+      "platform": "zhipu_qingyan",
+      "reviewedAppVersion": "3.8.7",
+      "accountLabel": "zhipu-b",
+      "enabled": true
+    },
+    {
+      "device": "AI_Apps_4KB_2",
+      "platform": "qwen",
+      "reviewedAppVersion": "7.6.5.3101",
+      "accountLabel": "qwen-b",
+      "enabled": true
+    },
+    {
+      "device": "AI_Apps_4KB_2",
+      "platform": "kimi",
+      "reviewedAppVersion": "3.1.8",
+      "accountLabel": "kimi-b",
+      "enabled": true
+    },
+    {
+      "device": "AI_Apps_4KB_2",
+      "platform": "deepseek",
+      "reviewedAppVersion": "2.8.0",
+      "accountLabel": "deepseek-b",
+      "enabled": true
+    },
+    {
+      "device": "AI_Apps_4KB_2",
+      "platform": "tencent_yuanbao",
+      "reviewedAppVersion": "2.92.0",
+      "accountLabel": "yuanbao-b",
+      "enabled": true
+    }
+  ]
+}

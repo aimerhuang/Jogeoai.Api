@@ -1,0 +1,949 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Model Monitor - Analytics V2</title>
+    <style>
+        :root {
+            --olive-primary: #708238;
+            --olive-dark: #4A5929;
+            --olive-light: #A8B87D;
+            --olive-ultra-light: #E8F0DC;
+            --olive-accent: #8A9D4F;
+            --bg-main: #FAFBF8;
+            --bg-card: #FFFFFF;
+            --text-main: #2D3A1A;
+            --text-muted: #6B7759;
+            --border: #D9E3C8;
+            --shadow-sm: 0 1px 3px rgba(112, 130, 56, 0.1);
+            --shadow-md: 0 4px 12px rgba(112, 130, 56, 0.12);
+            --shadow-lg: 0 8px 24px rgba(112, 130, 56, 0.15);
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+            background: var(--bg-main);
+            color: var(--text-main);
+            line-height: 1.6;
+        }
+
+        /* Top Navigation Bar */
+        .topnav {
+            background: var(--bg-card);
+            border-bottom: 1px solid var(--border);
+            padding: 0 40px;
+            height: 72px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            position: sticky;
+            top: 0;
+            z-index: 100;
+            box-shadow: var(--shadow-sm);
+        }
+
+        .brand {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+
+        .brand-icon {
+            width: 44px;
+            height: 44px;
+            background: linear-gradient(135deg, var(--olive-primary) 0%, var(--olive-accent) 100%);
+            border-radius: 10px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 22px;
+        }
+
+        .brand-text {
+            font-size: 20px;
+            font-weight: 700;
+            color: var(--olive-dark);
+            letter-spacing: -0.5px;
+        }
+
+        .nav-center {
+            display: flex;
+            gap: 32px;
+        }
+
+        .nav-link {
+            padding: 8px 0;
+            color: var(--text-muted);
+            text-decoration: none;
+            font-size: 15px;
+            font-weight: 500;
+            border-bottom: 2px solid transparent;
+            transition: all 0.3s;
+        }
+
+        .nav-link:hover {
+            color: var(--olive-primary);
+        }
+
+        .nav-link.active {
+            color: var(--olive-primary);
+            border-bottom-color: var(--olive-primary);
+        }
+
+        .nav-right {
+            display: flex;
+            align-items: center;
+            gap: 20px;
+        }
+
+        .lang-switcher {
+            display: flex;
+            background: var(--olive-ultra-light);
+            border-radius: 8px;
+            padding: 4px;
+            gap: 4px;
+        }
+
+        .lang-option {
+            padding: 6px 14px;
+            border-radius: 6px;
+            background: transparent;
+            border: none;
+            color: var(--text-muted);
+            cursor: pointer;
+            font-size: 13px;
+            font-weight: 500;
+            transition: all 0.2s;
+        }
+
+        .lang-option.active {
+            background: var(--bg-card);
+            color: var(--olive-primary);
+            box-shadow: var(--shadow-sm);
+        }
+
+        .user-menu {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            cursor: pointer;
+            padding: 8px 16px;
+            border-radius: 8px;
+            transition: background 0.2s;
+        }
+
+        .user-menu:hover {
+            background: var(--olive-ultra-light);
+        }
+
+        .user-avatar {
+            width: 32px;
+            height: 32px;
+            border-radius: 50%;
+            background: var(--olive-accent);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: white;
+            font-weight: 600;
+            font-size: 14px;
+        }
+
+        /* Main Content Area */
+        .container {
+            max-width: 1440px;
+            margin: 0 auto;
+            padding: 40px;
+        }
+
+        .page-header {
+            margin-bottom: 32px;
+        }
+
+        .page-title {
+            font-size: 32px;
+            font-weight: 700;
+            color: var(--olive-dark);
+            margin-bottom: 8px;
+        }
+
+        .page-desc {
+            font-size: 15px;
+            color: var(--text-muted);
+        }
+
+        /* Filters Bar */
+        .filters-bar {
+            background: var(--bg-card);
+            border-radius: 12px;
+            padding: 20px 24px;
+            margin-bottom: 32px;
+            box-shadow: var(--shadow-sm);
+            display: flex;
+            gap: 16px;
+            flex-wrap: wrap;
+            align-items: center;
+        }
+
+        .filter-group {
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+        }
+
+        .filter-label {
+            font-size: 12px;
+            color: var(--text-muted);
+            font-weight: 500;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .filter-select {
+            padding: 8px 14px;
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            background: var(--bg-card);
+            color: var(--text-main);
+            font-size: 14px;
+            cursor: pointer;
+            transition: all 0.2s;
+            min-width: 160px;
+        }
+
+        .filter-select:hover {
+            border-color: var(--olive-primary);
+        }
+
+        .filter-select:focus {
+            outline: none;
+            border-color: var(--olive-primary);
+            box-shadow: 0 0 0 3px var(--olive-ultra-light);
+        }
+
+        /* Analytics Grid */
+        .analytics-grid {
+            display: grid;
+            grid-template-columns: 2fr 1fr;
+            gap: 24px;
+            margin-bottom: 32px;
+        }
+
+        .chart-card {
+            background: var(--bg-card);
+            border-radius: 12px;
+            padding: 28px;
+            box-shadow: var(--shadow-sm);
+            border: 1px solid var(--border);
+        }
+
+        .chart-header {
+            margin-bottom: 24px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .chart-title {
+            font-size: 18px;
+            font-weight: 600;
+            color: var(--text-main);
+        }
+
+        .chart-period {
+            font-size: 13px;
+            color: var(--text-muted);
+        }
+
+        /* Donut Chart Styles */
+        .donut-container {
+            display: flex;
+            align-items: center;
+            gap: 32px;
+        }
+
+        .donut-chart {
+            position: relative;
+            width: 200px;
+            height: 200px;
+        }
+
+        .donut-svg {
+            transform: rotate(-90deg);
+        }
+
+        .donut-center {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            text-align: center;
+        }
+
+        .donut-total {
+            font-size: 36px;
+            font-weight: 700;
+            color: var(--olive-primary);
+        }
+
+        .donut-label {
+            font-size: 13px;
+            color: var(--text-muted);
+        }
+
+        .legend {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            gap: 16px;
+        }
+
+        .legend-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 12px 16px;
+            background: var(--olive-ultra-light);
+            border-radius: 8px;
+            transition: all 0.2s;
+        }
+
+        .legend-item:hover {
+            background: var(--olive-light);
+            transform: translateX(4px);
+        }
+
+        .legend-left {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+
+        .legend-color {
+            width: 12px;
+            height: 12px;
+            border-radius: 3px;
+        }
+
+        .legend-name {
+            font-size: 14px;
+            font-weight: 500;
+            color: var(--text-main);
+        }
+
+        .legend-value {
+            font-size: 16px;
+            font-weight: 600;
+            color: var(--olive-dark);
+        }
+
+        /* Bar Chart Placeholder */
+        .bar-chart {
+            height: 280px;
+            display: flex;
+            align-items: flex-end;
+            gap: 12px;
+            padding: 20px 0;
+        }
+
+        .bar {
+            flex: 1;
+            background: var(--olive-light);
+            border-radius: 6px 6px 0 0;
+            position: relative;
+            transition: all 0.3s;
+            cursor: pointer;
+        }
+
+        .bar:hover {
+            background: var(--olive-primary);
+        }
+
+        .bar-label {
+            position: absolute;
+            bottom: -24px;
+            left: 50%;
+            transform: translateX(-50%);
+            font-size: 12px;
+            color: var(--text-muted);
+            white-space: nowrap;
+        }
+
+        /* Data Table */
+        .data-table-card {
+            background: var(--bg-card);
+            border-radius: 12px;
+            box-shadow: var(--shadow-sm);
+            border: 1px solid var(--border);
+            overflow: hidden;
+        }
+
+        .table-header-bar {
+            padding: 20px 28px;
+            background: var(--olive-ultra-light);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .table-title {
+            font-size: 18px;
+            font-weight: 600;
+            color: var(--text-main);
+        }
+
+        .table-actions {
+            display: flex;
+            gap: 12px;
+        }
+
+        .btn-icon {
+            width: 32px;
+            height: 32px;
+            border-radius: 6px;
+            border: 1px solid var(--border);
+            background: var(--bg-card);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .btn-icon:hover {
+            background: var(--olive-primary);
+            border-color: var(--olive-primary);
+            color: white;
+        }
+
+        .data-table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+
+        .data-table thead {
+            background: var(--bg-main);
+        }
+
+        .data-table th {
+            padding: 16px 28px;
+            text-align: left;
+            font-size: 12px;
+            font-weight: 600;
+            color: var(--text-muted);
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            border-bottom: 1px solid var(--border);
+        }
+
+        .data-table td {
+            padding: 20px 28px;
+            border-bottom: 1px solid var(--border);
+            font-size: 14px;
+            color: var(--text-main);
+        }
+
+        .data-table tbody tr {
+            transition: background 0.2s;
+        }
+
+        .data-table tbody tr:hover {
+            background: var(--olive-ultra-light);
+        }
+
+        .model-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            padding: 6px 12px;
+            border-radius: 6px;
+            font-size: 13px;
+            font-weight: 500;
+        }
+
+        .model-badge.gpt {
+            background: #E6F7F1;
+            color: #0A6E4A;
+        }
+
+        .model-badge.gemini {
+            background: #E8F0FE;
+            color: #1A73E8;
+        }
+
+        .model-badge.claude {
+            background: #FCE8E0;
+            color: #A94A2C;
+        }
+
+        .model-icon {
+            width: 18px;
+            height: 18px;
+            border-radius: 4px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 10px;
+            font-weight: bold;
+            color: white;
+        }
+
+        .icon-gpt { background: #10A37F; }
+        .icon-gemini { background: #4285F4; }
+        .icon-claude { background: #CC785C; }
+
+        .visibility-bar {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .progress-bar {
+            flex: 1;
+            height: 8px;
+            background: var(--border);
+            border-radius: 4px;
+            overflow: hidden;
+        }
+
+        .progress-fill {
+            height: 100%;
+            background: var(--olive-primary);
+            border-radius: 4px;
+            transition: width 0.3s;
+        }
+
+        .progress-text {
+            font-size: 13px;
+            font-weight: 600;
+            color: var(--olive-dark);
+            min-width: 45px;
+            text-align: right;
+        }
+
+        .action-btn {
+            padding: 6px 14px;
+            border-radius: 6px;
+            border: 1px solid var(--border);
+            background: var(--bg-card);
+            color: var(--olive-primary);
+            font-size: 13px;
+            font-weight: 500;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .action-btn:hover {
+            background: var(--olive-primary);
+            border-color: var(--olive-primary);
+            color: white;
+        }
+
+        /* Metric Cards */
+        .metrics-row {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 20px;
+            margin-bottom: 32px;
+        }
+
+        .metric-card {
+            background: var(--bg-card);
+            border-radius: 12px;
+            padding: 24px;
+            box-shadow: var(--shadow-sm);
+            border: 1px solid var(--border);
+            position: relative;
+            overflow: hidden;
+        }
+
+        .metric-card::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            height: 4px;
+            background: linear-gradient(90deg, var(--olive-primary), var(--olive-accent));
+        }
+
+        .metric-label {
+            font-size: 13px;
+            color: var(--text-muted);
+            margin-bottom: 8px;
+            font-weight: 500;
+        }
+
+        .metric-value {
+            font-size: 28px;
+            font-weight: 700;
+            color: var(--olive-dark);
+            margin-bottom: 8px;
+        }
+
+        .metric-change {
+            font-size: 12px;
+            display: flex;
+            align-items: center;
+            gap: 4px;
+        }
+
+        .metric-change.positive {
+            color: #2E7D32;
+        }
+
+        .metric-change.negative {
+            color: #C62828;
+        }
+    </style>
+</head>
+<body>
+    <!-- Top Navigation -->
+    <nav class="topnav">
+        <div class="brand">
+            <div class="brand-icon">🤖</div>
+            <div class="brand-text">AI Monitor</div>
+        </div>
+
+        <div class="nav-center">
+            <a href="#" class="nav-link" data-en="Dashboard" data-zh="仪表盘">仪表盘</a>
+            <a href="#" class="nav-link active" data-en="Analytics" data-zh="数据分析">数据分析</a>
+            <a href="#" class="nav-link" data-en="Models" data-zh="模型管理">模型管理</a>
+            <a href="#" class="nav-link" data-en="Prompts" data-zh="提问库">提问库</a>
+        </div>
+
+        <div class="nav-right">
+            <div class="lang-switcher">
+                <button class="lang-option active" onclick="switchLang('zh')">中文</button>
+                <button class="lang-option" onclick="switchLang('en')">EN</button>
+            </div>
+            <div class="user-menu">
+                <div class="user-avatar">A</div>
+                <span>Admin</span>
+            </div>
+        </div>
+    </nav>
+
+    <!-- Main Content -->
+    <div class="container">
+        <div class="page-header">
+            <h1 class="page-title" data-en="Analytics & Insights" data-zh="数据分析与洞察">数据分析与洞察</h1>
+            <p class="page-desc" data-en="Comprehensive analysis of AI model response monitoring" data-zh="AI大模型回答监控的综合分析报告">AI大模型回答监控的综合分析报告</p>
+        </div>
+
+        <!-- Filters -->
+        <div class="filters-bar">
+            <div class="filter-group">
+                <label class="filter-label" data-en="Time Range" data-zh="时间范围">时间范围</label>
+                <select class="filter-select">
+                    <option data-en="Last 7 Days" data-zh="最近7天">最近7天</option>
+                    <option data-en="Last 30 Days" data-zh="最近30天">最近30天</option>
+                    <option data-en="Last 3 Months" data-zh="最近3个月">最近3个月</option>
+                </select>
+            </div>
+            <div class="filter-group">
+                <label class="filter-label" data-en="Model" data-zh="模型">模型</label>
+                <select class="filter-select">
+                    <option data-en="All Models" data-zh="所有模型">所有模型</option>
+                    <option>GPT-4 Turbo</option>
+                    <option>Gemini Pro</option>
+                    <option>Claude 3 Opus</option>
+                </select>
+            </div>
+            <div class="filter-group">
+                <label class="filter-label" data-en="Region" data-zh="地区">地区</label>
+                <select class="filter-select">
+                    <option data-en="Global" data-zh="全球">全球</option>
+                    <option data-en="North America" data-zh="北美">北美</option>
+                    <option data-en="Europe" data-zh="欧洲">欧洲</option>
+                    <option data-en="Asia Pacific" data-zh="亚太">亚太</option>
+                </select>
+            </div>
+        </div>
+
+        <!-- Metrics Row -->
+        <div class="metrics-row">
+            <div class="metric-card">
+                <div class="metric-label" data-en="Total Queries" data-zh="总查询数">总查询数</div>
+                <div class="metric-value">12,847</div>
+                <div class="metric-change positive">
+                    <span>↑ 18.5%</span>
+                    <span data-en="vs last period" data-zh="环比上期">环比上期</span>
+                </div>
+            </div>
+            <div class="metric-card">
+                <div class="metric-label" data-en="Avg Visibility" data-zh="平均可见率">平均可见率</div>
+                <div class="metric-value">68.3%</div>
+                <div class="metric-change positive">
+                    <span>↑ 5.2%</span>
+                    <span data-en="vs last period" data-zh="环比上期">环比上期</span>
+                </div>
+            </div>
+            <div class="metric-card">
+                <div class="metric-label" data-en="Response Time" data-zh="响应时间">响应时间</div>
+                <div class="metric-value">2.4s</div>
+                <div class="metric-change negative">
+                    <span>↓ 0.3s</span>
+                    <span data-en="vs last period" data-zh="环比上期">环比上期</span>
+                </div>
+            </div>
+            <div class="metric-card">
+                <div class="metric-label" data-en="Success Rate" data-zh="成功率">成功率</div>
+                <div class="metric-value">97.8%</div>
+                <div class="metric-change positive">
+                    <span>↑ 1.2%</span>
+                    <span data-en="vs last period" data-zh="环比上期">环比上期</span>
+                </div>
+            </div>
+        </div>
+
+        <!-- Analytics Grid -->
+        <div class="analytics-grid">
+            <!-- Model Distribution Donut -->
+            <div class="chart-card">
+                <div class="chart-header">
+                    <div class="chart-title" data-en="Model Distribution" data-zh="模型分布">模型分布</div>
+                    <div class="chart-period" data-en="Last 30 Days" data-zh="最近30天">最近30天</div>
+                </div>
+                <div class="donut-container">
+                    <div class="donut-chart">
+                        <svg class="donut-svg" width="200" height="200">
+                            <circle cx="100" cy="100" r="80" fill="none" stroke="#E8F0DC" stroke-width="30"/>
+                            <circle cx="100" cy="100" r="80" fill="none" stroke="#10A37F" stroke-width="30"
+                                    stroke-dasharray="175.93 502.65" stroke-dashoffset="0"/>
+                            <circle cx="100" cy="100" r="80" fill="none" stroke="#4285F4" stroke-width="30"
+                                    stroke-dasharray="150.80 502.65" stroke-dashoffset="-175.93"/>
+                            <circle cx="100" cy="100" r="80" fill="none" stroke="#CC785C" stroke-width="30"
+                                    stroke-dasharray="125.66 502.65" stroke-dashoffset="-326.73"/>
+                        </svg>
+                        <div class="donut-center">
+                            <div class="donut-total">12.8K</div>
+                            <div class="donut-label" data-en="Queries" data-zh="查询">查询</div>
+                        </div>
+                    </div>
+                    <div class="legend">
+                        <div class="legend-item">
+                            <div class="legend-left">
+                                <div class="legend-color" style="background: #10A37F;"></div>
+                                <span class="legend-name">GPT-4 Turbo</span>
+                            </div>
+                            <span class="legend-value">4,523</span>
+                        </div>
+                        <div class="legend-item">
+                            <div class="legend-left">
+                                <div class="legend-color" style="background: #4285F4;"></div>
+                                <span class="legend-name">Gemini Pro</span>
+                            </div>
+                            <span class="legend-value">3,876</span>
+                        </div>
+                        <div class="legend-item">
+                            <div class="legend-left">
+                                <div class="legend-color" style="background: #CC785C;"></div>
+                                <span class="legend-name">Claude 3 Opus</span>
+                            </div>
+                            <span class="legend-value">3,234</span>
+                        </div>
+                        <div class="legend-item">
+                            <div class="legend-left">
+                                <div class="legend-color" style="background: #E8F0DC;"></div>
+                                <span class="legend-name" data-en="Others" data-zh="其他">其他</span>
+                            </div>
+                            <span class="legend-value">1,214</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Visibility Trend Bar Chart -->
+            <div class="chart-card">
+                <div class="chart-header">
+                    <div class="chart-title" data-en="Visibility Trend" data-zh="可见性趋势">可见性趋势</div>
+                    <div class="chart-period" data-en="Daily" data-zh="按天">按天</div>
+                </div>
+                <div class="bar-chart">
+                    <div class="bar" style="height: 65%;">
+                        <span class="bar-label" data-en="Mon" data-zh="周一">周一</span>
+                    </div>
+                    <div class="bar" style="height: 70%;">
+                        <span class="bar-label" data-en="Tue" data-zh="周二">周二</span>
+                    </div>
+                    <div class="bar" style="height: 68%;">
+                        <span class="bar-label" data-en="Wed" data-zh="周三">周三</span>
+                    </div>
+                    <div class="bar" style="height: 72%;">
+                        <span class="bar-label" data-en="Thu" data-zh="周四">周四</span>
+                    </div>
+                    <div class="bar" style="height: 75%;">
+                        <span class="bar-label" data-en="Fri" data-zh="周五">周五</span>
+                    </div>
+                    <div class="bar" style="height: 60%;">
+                        <span class="bar-label" data-en="Sat" data-zh="周六">周六</span>
+                    </div>
+                    <div class="bar" style="height: 58%;">
+                        <span class="bar-label" data-en="Sun" data-zh="周日">周日</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Data Table -->
+        <div class="data-table-card">
+            <div class="table-header-bar">
+                <h3 class="table-title" data-en="Model Performance Details" data-zh="模型性能详情">模型性能详情</h3>
+                <div class="table-actions">
+                    <button class="btn-icon" title="Export">📥</button>
+                    <button class="btn-icon" title="Filter">🔍</button>
+                    <button class="btn-icon" title="Settings">⚙️</button>
+                </div>
+            </div>
+            <table class="data-table">
+                <thead>
+                    <tr>
+                        <th data-en="Model" data-zh="模型">模型</th>
+                        <th data-en="Total Queries" data-zh="总查询">总查询</th>
+                        <th data-en="Visibility Rate" data-zh="可见率">可见率</th>
+                        <th data-en="Avg Response Time" data-zh="平均响应时间">平均响应时间</th>
+                        <th data-en="Success Rate" data-zh="成功率">成功率</th>
+                        <th data-en="Action" data-zh="操作">操作</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td>
+                            <div class="model-badge gpt">
+                                <div class="model-icon icon-gpt">G</div>
+                                <span>GPT-4 Turbo</span>
+                            </div>
+                        </td>
+                        <td>4,523</td>
+                        <td>
+                            <div class="visibility-bar">
+                                <div class="progress-bar">
+                                    <div class="progress-fill" style="width: 72.5%;"></div>
+                                </div>
+                                <span class="progress-text">72.5%</span>
+                            </div>
+                        </td>
+                        <td>2.1s</td>
+                        <td>98.2%</td>
+                        <td><button class="action-btn" data-en="Details" data-zh="详情">详情</button></td>
+                    </tr>
+                    <tr>
+                        <td>
+                            <div class="model-badge gemini">
+                                <div class="model-icon icon-gemini">Ge</div>
+                                <span>Gemini Pro</span>
+                            </div>
+                        </td>
+                        <td>3,876</td>
+                        <td>
+                            <div class="visibility-bar">
+                                <div class="progress-bar">
+                                    <div class="progress-fill" style="width: 65.8%;"></div>
+                                </div>
+                                <span class="progress-text">65.8%</span>
+                            </div>
+                        </td>
+                        <td>2.7s</td>
+                        <td>97.5%</td>
+                        <td><button class="action-btn" data-en="Details" data-zh="详情">详情</button></td>
+                    </tr>
+                    <tr>
+                        <td>
+                            <div class="model-badge claude">
+                                <div class="model-icon icon-claude">C</div>
+                                <span>Claude 3 Opus</span>
+                            </div>
+                        </td>
+                        <td>3,234</td>
+                        <td>
+                            <div class="visibility-bar">
+                                <div class="progress-bar">
+                                    <div class="progress-fill" style="width: 69.2%;"></div>
+                                </div>
+                                <span class="progress-text">69.2%</span>
+                            </div>
+                        </td>
+                        <td>2.5s</td>
+                        <td>97.8%</td>
+                        <td><button class="action-btn" data-en="Details" data-zh="详情">详情</button></td>
+                    </tr>
+                    <tr>
+                        <td>
+                            <div class="model-badge gpt">
+                                <div class="model-icon icon-gpt">G</div>
+                                <span>GPT-3.5 Turbo</span>
+                            </div>
+                        </td>
+                        <td>842</td>
+                        <td>
+                            <div class="visibility-bar">
+                                <div class="progress-bar">
+                                    <div class="progress-fill" style="width: 58.3%;"></div>
+                                </div>
+                                <span class="progress-text">58.3%</span>
+                            </div>
+                        </td>
+                        <td>1.8s</td>
+                        <td>96.8%</td>
+                        <td><button class="action-btn" data-en="Details" data-zh="详情">详情</button></td>
+                    </tr>
+                    <tr>
+                        <td>
+                            <div class="model-badge gemini">
+                                <div class="model-icon icon-gemini">Ge</div>
+                                <span>Gemini Ultra</span>
+                            </div>
+                        </td>
+                        <td>372</td>
+                        <td>
+                            <div class="visibility-bar">
+                                <div class="progress-bar">
+                                    <div class="progress-fill" style="width: 71.2%;"></div>
+                                </div>
+                                <span class="progress-text">71.2%</span>
+                            </div>
+                        </td>
+                        <td>3.2s</td>
+                        <td>98.5%</td>
+                        <td><button class="action-btn" data-en="Details" data-zh="详情">详情</button></td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <script>
+        let currentLang = 'zh';
+
+        function switchLang(lang) {
+            currentLang = lang;
+
+            // Update lang switcher buttons
+            document.querySelectorAll('.lang-option').forEach(btn => {
+                btn.classList.remove('active');
+            });
+            event.target.classList.add('active');
+
+            // Update all translatable elements
+            document.querySelectorAll('[data-en][data-zh]').forEach(el => {
+                const text = el.getAttribute('data-' + lang);
+                if (text) {
+                    if (el.tagName === 'OPTION') {
+                        el.textContent = text;
+                    } else {
+                        el.textContent = text;
+                    }
+                }
+            });
+        }
+    </script>
+</body>
+</html>

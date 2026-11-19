@@ -1,0 +1,11 @@
+{
+  "name": "@aivc/contracts",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": "./src/index.ts",
+  "dependencies": {
+    "@aivc/domain": "workspace:*",
+    "zod": "4.1.5"
+  }
+}

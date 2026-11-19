@@ -1,0 +1,245 @@
+{
+  "run": {
+    "runId": "9112f588-14f4-4a04-bf33-a0b3f4e3c69b",
+    "siteId": "ded1a716-f791-491c-96e2-f737bb998960",
+    "status": "succeeded",
+    "totalChecks": 10,
+    "succeededChecks": 10,
+    "failedChecks": 0,
+    "createdAt": "2026-10-25T01:43:48+00:00",
+    "startedAt": "2026-10-25T01:44:23+00:00",
+    "completedAt": "2026-10-25T01:59:29+00:00",
+    "errorCode": "",
+    "errorMessage": "",
+    "provider": "domestic_collector",
+    "expectedChecks": 10,
+    "collectionCompletedChecks": 10,
+    "analysisStatus": "not_started",
+    "analyzedChecks": 0
+  },
+  "checks": [
+    {
+      "checkId": "c0ac2788-cc11-4cc3-b4d7-1b57bfad96d9",
+      "promptId": "028ad5d9-5bd5-4097-a53b-59305f21ed8f",
+      "status": "succeeded",
+      "answerChars": 1497,
+      "hasMarkdown": true,
+      "citations": 18,
+      "titledCitations": 18,
+      "webQueries": 3,
+      "queryAvailability": "available",
+      "analysis": {
+        "status": "completed",
+        "analysisVersion": 10,
+        "configurationOutdated": false
+      },
+      "brandMentioned": false
+    },
+    {
+      "checkId": "b6e944d4-1ec9-4b8d-ad76-205be6880996",
+      "promptId": "0de81940-0cf6-4753-92fa-2add0a21adf1",
+      "status": "succeeded",
+      "answerChars": 1343,
+      "hasMarkdown": true,
+      "citations": 46,
+      "titledCitations": 46,
+      "webQueries": 8,
+      "queryAvailability": "available",
+      "analysis": {
+        "status": "completed",
+        "analysisVersion": 10,
+        "configurationOutdated": false
+      },
+      "brandMentioned": true
+    },
+    {
+      "checkId": "2ab6b7b0-6d4d-4c82-8666-361f6c705c59",
+      "promptId": "29501069-0dba-4a4b-9d36-70e921ae2e57",
+      "status": "succeeded",
+      "answerChars": 1764,
+      "hasMarkdown": true,
+      "citations": 38,
+      "titledCitations": 38,
+      "webQueries": 7,
+      "queryAvailability": "available",
+      "analysis": {
+        "status": "completed",
+        "analysisVersion": 10,
+        "configurationOutdated": false
+      },
+      "brandMentioned": true
+    },
+    {
+      "checkId": "877d4001-b84f-4759-9209-4039205d98df",
+      "promptId": "480bc6e4-da6d-449c-af3f-27e2fcac3fcc",
+      "status": "succeeded",
+      "answerChars": 1376,
+      "hasMarkdown": true,
+      "citations": 33,
+      "titledCitations": 33,
+      "webQueries": 6,
+      "queryAvailability": "available",
+      "analysis": {
+        "status": "completed",
+        "analysisVersion": 10,
+        "configurationOutdated": false
+      },
+      "brandMentioned": true
+    },
+    {
+      "checkId": "18f2c0c2-9e05-4eac-9cde-4afd71735640",
+      "promptId": "4b9dda0f-f01b-4170-8948-bc8e5f92ea31",
+      "status": "succeeded",
+      "answerChars": 1076,
+      "hasMarkdown": true,
+      "citations": 41,
+      "titledCitations": 41,
+      "webQueries": 7,
+      "queryAvailability": "available",
+      "analysis": {
+        "status": "completed",
+        "analysisVersion": 10,
+        "configurationOutdated": false
+      },
+      "brandMentioned": false
+    },
+    {
+      "checkId": "54fe261b-ce1c-46a7-9db2-d620b5d7f730",
+      "promptId": "820a0118-ad50-4fad-9d9d-257a492c1b02",
+      "status": "succeeded",
+      "answerChars": 1494,
+      "hasMarkdown": true,
+      "citations": 17,
+      "titledCitations": 17,
+      "webQueries": 5,
+      "queryAvailability": "available",
+      "analysis": {
+        "status": "completed",
+        "analysisVersion": 10,
+        "configurationOutdated": false
+      },
+      "brandMentioned": false
+    },
+    {
+      "checkId": "a867620a-dd07-4c48-baba-7413d71f2334",
+      "promptId": "91400724-e821-4523-98ae-6668cc24a5cb",
+      "status": "succeeded",
+      "answerChars": 1760,
+      "hasMarkdown": true,
+      "citations": 47,
+      "titledCitations": 47,
+      "webQueries": 8,
+      "queryAvailability": "available",
+      "analysis": {
+        "status": "completed",
+        "analysisVersion": 10,
+        "configurationOutdated": false
+      },
+      "brandMentioned": true
+    },
+    {
+      "checkId": "0ca74ef3-e5ec-4a7e-922a-f00a0340b5d7",
+      "promptId": "acbdfbcc-07c5-4ac6-b714-753a041e25ad",
+      "status": "succeeded",
+      "answerChars": 1421,
+      "hasMarkdown": true,
+      "citations": 35,
+      "titledCitations": 35,
+      "webQueries": 6,
+      "queryAvailability": "available",
+      "analysis": {
+        "status": "completed",
+        "analysisVersion": 10,
+        "configurationOutdated": false
+      },
+      "brandMentioned": false
+    },
+    {
+      "checkId": "a7b1bb75-d622-465e-8cf0-51b97f8ec710",
+      "promptId": "b319d9c7-2c16-4287-83d0-d96643fe96d5",
+      "status": "succeeded",
+      "answerChars": 1450,
+      "hasMarkdown": true,
+      "citations": 43,
+      "titledCitations": 43,
+      "webQueries": 8,
+      "queryAvailability": "available",
+      "analysis": {
+        "status": "completed",
+        "analysisVersion": 10,
+        "configurationOutdated": false
+      },
+      "brandMentioned": true
+    },
+    {
+      "checkId": "a4432e36-377c-41e0-866e-84ab61a05861",
+      "promptId": "f041504f-7e21-488e-9548-fa61c1dcaa22",
+      "status": "succeeded",
+      "answerChars": 1132,
+      "hasMarkdown": true,
+      "citations": 40,
+      "titledCitations": 40,
+      "webQueries": 7,
+      "queryAvailability": "available",
+      "analysis": {
+        "status": "completed",
+        "analysisVersion": 10,
+        "configurationOutdated": false
+      },
+      "brandMentioned": true
+    }
+  ],
+  "totals": {
+    "succeeded": 10,
+    "distinctPrompts": 10,
+    "citations": 358,
+    "titledCitations": 358,
+    "withWebQueries": 10,
+    "withMarkdown": 10,
+    "brandMentionedChecks": 6
+  },
+  "analysisWork": [
+    [
+      "completed",
+      "10"
+    ]
+  ],
+  "taskStatus": [
+    [
+      "succeeded",
+      "1",
+      "10"
+    ]
+  ],
+  "submissions": [
+    [
+      "accepted",
+      "10"
+    ]
+  ],
+  "browserAttempts": 10,
+  "browserAttemptsExactlyOnce": true,
+  "monitoringTotalCount": 10,
+  "monitoringMatchesChecks": true,
+  "profileLocked": false,
+  "spoolLocked": false,
+  "spoolFiles": [
+    ".binding"
+  ],
+  "verifiedAt": "2026-10-25T02:01:24+00:00",
+  "recovery": {
+    "event": "original_answer_recovered",
+    "taskId": "a97dece7-e369-4830-ab64-cdf73839d924",
+    "leaseVersion": 1,
+    "disposition": "accepted",
+    "conversationUrl": "https://www.doubao.com/chat/38449057615606786",
+    "plainHash": "d7cfbd43702274603e742582e81f3ae945a8414469e3468d8fb9e356f8068f54",
+    "markdownHash": "537ba052341cf1bf8a96aaf96de77ca7c7744988a13b8abf0925537cf1450182",
+    "chars": 1764,
+    "citations": 38,
+    "queries": 7,
+    "noPromptSent": true,
+    "ledgerUnchanged": true,
+    "at": "2026-10-25T01:52:06.767Z"
+  }
+}

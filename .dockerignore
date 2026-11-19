@@ -1,0 +1,22 @@
+# Keep secrets, local data and large non-build directories out of the Docker build context.
+.git
+.env
+.env.*
+!.env.example
+**/.backups
+**/.data
+**/.local
+.trellis
+.claude
+.codex
+.agents
+.vscode
+.idea
+.DS_Store
+references
+tests
+docx
+collector
+**/bin
+**/obj
+**/node_modules

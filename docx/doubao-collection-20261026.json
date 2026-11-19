@@ -1,0 +1,308 @@
+{
+  "run": {
+    "runId": "b0203785-969b-4eb1-8c96-9b749576630b",
+    "siteId": "ded1a716-f791-491c-96e2-f737bb998960",
+    "status": "succeeded",
+    "totalChecks": 10,
+    "succeededChecks": 10,
+    "failedChecks": 0,
+    "createdAt": "2026-10-26T00:52:20+00:00",
+    "startedAt": "2026-10-26T01:11:43+00:00",
+    "completedAt": "2026-10-26T01:26:52+00:00",
+    "errorCode": "",
+    "errorMessage": "",
+    "provider": "domestic_collector",
+    "expectedChecks": 10,
+    "collectionCompletedChecks": 10,
+    "analysisStatus": "not_started",
+    "analyzedChecks": 0
+  },
+  "checks": [
+    {
+      "checkId": "89b2ffe0-a45f-4aae-9fa4-fe1b3ba75260",
+      "promptId": "028ad5d9-5bd5-4097-a53b-59305f21ed8f",
+      "status": "succeeded",
+      "answerChars": 1479,
+      "hasMarkdown": true,
+      "citations": 18,
+      "titledCitations": 18,
+      "webQueries": 3,
+      "queryAvailability": "available",
+      "analysis": {
+        "status": "completed",
+        "analysisVersion": 10,
+        "configurationOutdated": false
+      },
+      "brandMentioned": false
+    },
+    {
+      "checkId": "92c6d4b4-babb-4e97-9186-99b138598f10",
+      "promptId": "0de81940-0cf6-4753-92fa-2add0a21adf1",
+      "status": "succeeded",
+      "answerChars": 1602,
+      "hasMarkdown": true,
+      "citations": 38,
+      "titledCitations": 38,
+      "webQueries": 7,
+      "queryAvailability": "available",
+      "analysis": {
+        "status": "completed",
+        "analysisVersion": 10,
+        "configurationOutdated": false
+      },
+      "brandMentioned": false
+    },
+    {
+      "checkId": "4b5e3b50-8db3-45b0-8d5a-54cf65a3ece7",
+      "promptId": "29501069-0dba-4a4b-9d36-70e921ae2e57",
+      "status": "succeeded",
+      "answerChars": 1427,
+      "hasMarkdown": true,
+      "citations": 40,
+      "titledCitations": 40,
+      "webQueries": 7,
+      "queryAvailability": "available",
+      "analysis": {
+        "status": "completed",
+        "analysisVersion": 10,
+        "configurationOutdated": false
+      },
+      "brandMentioned": true
+    },
+    {
+      "checkId": "5c387ad8-bfcd-4d0c-ac78-1a4b36808158",
+      "promptId": "480bc6e4-da6d-449c-af3f-27e2fcac3fcc",
+      "status": "succeeded",
+      "answerChars": 1406,
+      "hasMarkdown": true,
+      "citations": 18,
+      "titledCitations": 18,
+      "webQueries": 3,
+      "queryAvailability": "available",
+      "analysis": {
+        "status": "completed",
+        "analysisVersion": 10,
+        "configurationOutdated": false
+      },
+      "brandMentioned": true
+    },
+    {
+      "checkId": "9ec09d91-435f-4f35-8210-df4d3efde124",
+      "promptId": "4b9dda0f-f01b-4170-8948-bc8e5f92ea31",
+      "status": "succeeded",
+      "answerChars": 1406,
+      "hasMarkdown": true,
+      "citations": 18,
+      "titledCitations": 18,
+      "webQueries": 3,
+      "queryAvailability": "available",
+      "analysis": {
+        "status": "completed",
+        "analysisVersion": 10,
+        "configurationOutdated": false
+      },
+      "brandMentioned": true
+    },
+    {
+      "checkId": "80b9c2a6-903a-4574-a25d-6db293bd74eb",
+      "promptId": "820a0118-ad50-4fad-9d9d-257a492c1b02",
+      "status": "succeeded",
+      "answerChars": 1547,
+      "hasMarkdown": true,
+      "citations": 31,
+      "titledCitations": 31,
+      "webQueries": 8,
+      "queryAvailability": "available",
+      "analysis": {
+        "status": "completed",
+        "analysisVersion": 10,
+        "configurationOutdated": false
+      },
+      "brandMentioned": true
+    },
+    {
+      "checkId": "64e3387b-c47d-4929-9213-c71c530936eb",
+      "promptId": "91400724-e821-4523-98ae-6668cc24a5cb",
+      "status": "succeeded",
+      "answerChars": 1572,
+      "hasMarkdown": true,
+      "citations": 43,
+      "titledCitations": 43,
+      "webQueries": 8,
+      "queryAvailability": "available",
+      "analysis": {
+        "status": "completed",
+        "analysisVersion": 10,
+        "configurationOutdated": false
+      },
+      "brandMentioned": true
+    },
+    {
+      "checkId": "ab61502b-3294-4e50-8e85-2b5c65c21786",
+      "promptId": "acbdfbcc-07c5-4ac6-b714-753a041e25ad",
+      "status": "succeeded",
+      "answerChars": 1275,
+      "hasMarkdown": true,
+      "citations": 42,
+      "titledCitations": 42,
+      "webQueries": 7,
+      "queryAvailability": "available",
+      "analysis": {
+        "status": "completed",
+        "analysisVersion": 10,
+        "configurationOutdated": false
+      },
+      "brandMentioned": false
+    },
+    {
+      "checkId": "11648106-e16e-4347-81ad-07a4547dc662",
+      "promptId": "b319d9c7-2c16-4287-83d0-d96643fe96d5",
+      "status": "succeeded",
+      "answerChars": 1336,
+      "hasMarkdown": true,
+      "citations": 44,
+      "titledCitations": 44,
+      "webQueries": 8,
+      "queryAvailability": "available",
+      "analysis": {
+        "status": "completed",
+        "analysisVersion": 10,
+        "configurationOutdated": false
+      },
+      "brandMentioned": true
+    },
+    {
+      "checkId": "de8dbd2b-38d3-4d29-a99d-dfaab6f1f9cd",
+      "promptId": "f041504f-7e21-488e-9548-fa61c1dcaa22",
+      "status": "succeeded",
+      "answerChars": 990,
+      "hasMarkdown": true,
+      "citations": 40,
+      "titledCitations": 40,
+      "webQueries": 7,
+      "queryAvailability": "available",
+      "analysis": {
+        "status": "completed",
+        "analysisVersion": 10,
+        "configurationOutdated": false
+      },
+      "brandMentioned": true
+    }
+  ],
+  "totals": {
+    "succeeded": 10,
+    "distinctPrompts": 10,
+    "citations": 332,
+    "titledCitations": 332,
+    "withWebQueries": 10,
+    "withMarkdown": 10,
+    "brandMentionedChecks": 7
+  },
+  "analysisWork": [
+    [
+      "completed",
+      "10"
+    ]
+  ],
+  "taskStatus": [
+    [
+      "succeeded",
+      "1",
+      "8"
+    ],
+    [
+      "succeeded",
+      "2",
+      "2"
+    ]
+  ],
+  "submissions": [
+    [
+      "accepted",
+      "10"
+    ]
+  ],
+  "browserAttempts": 12,
+  "browserAttemptCounts": {
+    "1e5bd430-fb78-4103-8196-fef4863a4e19": 1,
+    "2006e536-a0b3-4689-8bd7-2c1fbfd3e8de": 1,
+    "5e8b0e8b-1716-4088-84e1-c2b488d23ebd": 1,
+    "62792846-118f-4d03-ab22-4479cfe7b009": 2,
+    "7be982b5-36ca-4a76-a6a9-7eb47501264a": 1,
+    "830b2461-639c-4cba-b3e2-e2e902aeeab8": 1,
+    "9e8c4a97-0c51-4876-b789-f0f12d66547b": 2,
+    "ac492dbd-4761-42f4-ada8-cf3167902f4c": 1,
+    "f90d378e-caa6-4d9f-ab4c-44841a33be68": 1,
+    "f9e026f6-4f3a-4ee1-870f-90f4c2b5d340": 1
+  },
+  "firstAttemptUnsentEvidence": {
+    "url": "https://www.doubao.com/chat",
+    "sentMessages": 0,
+    "assistantMessages": 0,
+    "captchaFrame": 0,
+    "noPromptSent": true,
+    "challengeRequired": 0,
+    "loginRequired": 0,
+    "regionRestricted": 0,
+    "rateLimited": 0
+  },
+  "thirdAttemptUnsentEvidence": {
+    "url": "https://www.doubao.com/chat",
+    "sentMessages": 0,
+    "assistantMessages": 0,
+    "captchaFrame": 0,
+    "noPromptSent": true,
+    "challengeRequired": 0,
+    "loginRequired": 0,
+    "regionRestricted": 0,
+    "rateLimited": 0
+  },
+  "allTasksInBrowserLedger": true,
+  "monitoringTotalCount": 10,
+  "monitoringMatchesChecks": true,
+  "profileLocked": false,
+  "spoolLocked": false,
+  "spoolFiles": [
+    ".binding"
+  ],
+  "runtime": {
+    "workerStartedFromExistingBuild": true,
+    "workerLauncherPid": 17734,
+    "collectorDriverExited": true,
+    "createdTrellisTask": false,
+    "apiReadiness": "Healthy",
+    "workerApplicationPid": 17738,
+    "apiPid": 54871,
+    "collectorProcessCheck": "no_matches"
+  },
+  "preSendStoppedAttempts": [
+    {
+      "taskId": "62792846-118f-4d03-ab22-4479cfe7b009",
+      "visits": [
+        {
+          "url": "https://www.doubao.com/chat/",
+          "at": "2026-10-26T00:52:23.430519+00:00"
+        },
+        {
+          "url": "https://www.doubao.com/chat/local_4551063145252213",
+          "at": "2026-10-26T00:52:26.628235+00:00"
+        }
+      ],
+      "remoteConversationCreated": false
+    },
+    {
+      "taskId": "9e8c4a97-0c51-4876-b789-f0f12d66547b",
+      "visits": [
+        {
+          "url": "https://www.doubao.com/chat/",
+          "at": "2026-10-26T01:13:24.001041+00:00"
+        },
+        {
+          "url": "https://www.doubao.com/chat/local_1271671071402205",
+          "at": "2026-10-26T01:13:26.848085+00:00"
+        }
+      ],
+      "remoteConversationCreated": false
+    }
+  ]
+}

@@ -1,0 +1,95 @@
+# Server stack: MySQL + Jogeoai API + Jogeoai Worker (+ optional collector image).
+# Run from the repository root:
+#   cp deploy/.env.production.example deploy/.env   # fill in values, chmod 600
+#   docker compose -f deploy/compose.yml --env-file deploy/.env up -d --build
+# See docx/deployment.md.
+name: jogeoai
+
+x-dotnet-env: &dotnet-env
+  ConnectionStrings__Default: "Server=mysql;Port=3306;Database=${MYSQL_DATABASE:-jogeoai};User ID=${MYSQL_USER:-jogeoai_app};Password=${MYSQL_PASSWORD:?set MYSQL_PASSWORD};Connection Timeout=5;Default Command Timeout=30;"
+  Collector__ChinaServiceToken: ${COLLECTOR_CHINA_SERVICE_TOKEN:-}
+  Collector__ChinaTenantIds__0: ${COLLECTOR_CHINA_TENANT_ID_0:-}
+  Collector__AppTenantIds__0: ${COLLECTOR_APP_TENANT_ID_0:-}
+  Email__Host: ${EMAIL_HOST:-smtp.163.com}
+  Email__Port: ${EMAIL_PORT:-465}
+  Email__Username: ${EMAIL_USERNAME:-}
+  Email__Password: ${EMAIL_PASSWORD:-}
+  Email__FromName: ${EMAIL_FROM_NAME:-Jogeo AI}
+  TZ: UTC
+
+services:
+  mysql:
+    # mysql:8.4 plus db/migrations/*.sql in /docker-entrypoint-initdb.d (see Dockerfile.mysql).
+    # They run in file-name order ONLY when mysql_data is empty (first start).
+    image: ${JOGEOAI_IMAGE_PREFIX:-jogeoai}-mysql:${JOGEOAI_TAG:-latest}
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.mysql
+    restart: unless-stopped
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_0900_ai_ci
+      - --default-time-zone=+00:00
+    environment:
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-jogeoai}
+      MYSQL_USER: ${MYSQL_USER:-jogeoai_app}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:?set MYSQL_PASSWORD}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?set MYSQL_ROOT_PASSWORD}
+    # No published port: only api and worker reach MySQL over the compose network.
+    volumes:
+      - mysql_data:/var/lib/mysql
+    healthcheck:
+      # Healthy only after the first-start migrations all succeeded (marker written by the
+      # last init script, see Dockerfile.mysql) AND the server accepts TCP connections.
+      test: ["CMD-SHELL", "test -f /var/lib/mysql/.jogeoai-initdb-complete && MYSQL_PWD=\"$$MYSQL_PASSWORD\" mysql --protocol=TCP -h 127.0.0.1 -u \"$$MYSQL_USER\" \"$$MYSQL_DATABASE\" -e 'SELECT 1' >/dev/null"]
+      interval: 5s
+      timeout: 3s
+      retries: 60
+      start_period: 60s
+
+  api:
+    image: ${JOGEOAI_IMAGE_PREFIX:-jogeoai}-api:${JOGEOAI_TAG:-latest}
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.api
+    restart: unless-stopped
+    environment:
+      <<: *dotnet-env
+    # Bound to loopback only: put a TLS gateway (Caddy / Nginx) on the host in front of it.
+    ports:
+      - "127.0.0.1:${API_PORT:-5260}:8080"
+    volumes:
+      - knowledge_data:/app/data
+    depends_on:
+      mysql:
+        condition: service_healthy
+
+  worker:
+    image: ${JOGEOAI_IMAGE_PREFIX:-jogeoai}-worker:${JOGEOAI_TAG:-latest}
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.worker
+    restart: unless-stopped
+    environment:
+      <<: *dotnet-env
+    volumes:
+      - knowledge_data:/app/data
+    depends_on:
+      mysql:
+        condition: service_healthy
+
+  # Optional, off by default (docker compose --profile collector ...).
+  # Builds the Node collector workspace from collector/. The image has no browser and no adb:
+  # it cannot do real web or App collection on the server. App nodes run natively on the
+  # collection computers; see docx/deployment.md.
+  collector:
+    profiles: ["collector"]
+    image: ${JOGEOAI_IMAGE_PREFIX:-jogeoai}-collector:${JOGEOAI_TAG:-latest}
+    build:
+      context: ../collector
+      dockerfile: infra/docker/app.Dockerfile
+    command: ["node", "--version"]
+
+volumes:
+  mysql_data:
+  knowledge_data:

@@ -1,0 +1,44 @@
+<!doctype html>
+<!-- Synthetic test-only source panel. No live page or account content. -->
+<html lang="zh-CN">
+  <body>
+    <div id="authenticated">Fixture account</div>
+    <button
+      id="new"
+      onclick="document.querySelector('#messages').replaceChildren(); document.querySelector('#composer').value = ''"
+    >
+      New conversation
+    </button>
+    <textarea id="composer"></textarea>
+    <div id="conversation-active">Default conversation active</div>
+    <button
+      id="submit"
+      onclick="document.querySelector('#messages').innerHTML = document.querySelector('#answer-template').innerHTML"
+    >
+      Send
+    </button>
+    <div id="messages"></div>
+    <a class="citation" href="https://unrelated.example.com/">Outside message</a>
+    <template id="answer-template">
+      <article class="assistant">
+        <div class="answer">Synthetic answer body only.</div>
+        <button
+          class="sources-toggle"
+          onclick="this.dataset.clicks = Number(this.dataset.clicks || 0) + 1; const panel = this.nextElementSibling; setTimeout(() => { panel.hidden = false; setTimeout(() => { panel.querySelector('[hidden]').hidden = false }, 40) }, 40)"
+        >
+          搜索 2 个关键词，参考 2 篇资料
+        </button>
+        <section class="sources" hidden>
+          <div class="search-queries">“合成关键词 一”、“合成关键词 二”</div>
+          <a class="citation" href="https://example.com/first"
+            ><span>1.</span> Synthetic source snippet one</a
+          >
+          <a class="citation" href="https://example.com/second" hidden
+            >2. Synthetic source snippet two</a
+          >
+        </section>
+        <span class="complete">Complete</span>
+      </article>
+    </template>
+  </body>
+</html>

@@ -1,0 +1,20 @@
+# Jogeoai API image. Build context: repository root.
+#   docker build -f deploy/Dockerfile.api -t jogeoai-api .
+FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
+WORKDIR /src
+COPY . .
+RUN dotnet publish src/Jogeoai.Api/Jogeoai.Api.csproj -c Release -o /out /p:UseAppHost=false
+
+FROM mcr.microsoft.com/dotnet/aspnet:10.0 AS runtime
+WORKDIR /app
+COPY --from=build /out ./
+# Knowledge files (local storage provider) live on a named volume mounted here;
+# the directory must exist and belong to the non-root user before the volume is first created.
+RUN mkdir -p /app/data/knowledge /app/data/knowledge-vectors && chown -R $APP_UID /app/data
+ENV ASPNETCORE_ENVIRONMENT=Production \
+    ASPNETCORE_URLS=http://+:8080 \
+    Knowledge__StorageRoot=/app/data/knowledge \
+    Knowledge__VectorRoot=/app/data/knowledge-vectors
+EXPOSE 8080
+USER $APP_UID
+ENTRYPOINT ["dotnet", "Jogeoai.Api.dll"]

@@ -1,0 +1,1 @@
+DROP INDEX IF EXISTS metric_versions_one_active_per_code_idx;

@@ -1,0 +1,21 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <ItemGroup>
+    <ProjectReference Include="..\Jogeoai.Providers.Abstractions\Jogeoai.Providers.Abstractions.csproj" />
+    <ProjectReference Include="..\Jogeoai.Application\Jogeoai.Application.csproj" />
+    <ProjectReference Include="..\Jogeoai.Domain\Jogeoai.Domain.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- IHttpClientFactory, ILogger and IServiceCollection come from the shared framework, as in Providers.Cloro. -->
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+  </ItemGroup>
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+  </PropertyGroup>
+
+</Project>

@@ -1,0 +1,111 @@
+{
+  "verifiedAt": "2026-10-30T01:56:25.363Z",
+  "siteId": "ded1a716-f791-491c-96e2-f737bb998960",
+  "run": {
+    "runId": "54f34364-4591-4e60-8497-f7743b307d27",
+    "siteId": "ded1a716-f791-491c-96e2-f737bb998960",
+    "status": "running",
+    "totalChecks": 10,
+    "succeededChecks": 0,
+    "failedChecks": 0,
+    "createdAt": "2026-10-30T01:53:42+00:00",
+    "startedAt": null,
+    "completedAt": null,
+    "errorCode": "",
+    "errorMessage": "",
+    "provider": "domestic_collector",
+    "expectedChecks": 10,
+    "collectionCompletedChecks": 0,
+    "analysisStatus": "not_started",
+    "analyzedChecks": 0
+  },
+  "checks": [],
+  "tasks": [
+    [
+      "7aad01ed-2dfc-46ac-9202-c3af6b8a36af",
+      "pending",
+      "0",
+      ""
+    ],
+    [
+      "9bbdd811-f773-48b2-8b22-ceaf11f9ffff",
+      "pending",
+      "0",
+      ""
+    ],
+    [
+      "d1d66ba7-69ff-4f90-8966-3d1a339df6a6",
+      "pending",
+      "0",
+      ""
+    ],
+    [
+      "bd6e7aa4-a32d-453f-9141-0a0057dba1e4",
+      "pending",
+      "0",
+      ""
+    ],
+    [
+      "c6176a93-4ba0-44c9-9989-bfb0d7810ce3",
+      "pending",
+      "0",
+      ""
+    ],
+    [
+      "0c9c3a87-e47c-4e27-ac54-12fc02b2ca1c",
+      "pending",
+      "0",
+      ""
+    ],
+    [
+      "b804c06b-7956-4322-bbd9-2d99775f639e",
+      "pending",
+      "0",
+      ""
+    ],
+    [
+      "d9c79bd8-bfaf-4216-a07a-158ee19bd400",
+      "pending",
+      "0",
+      ""
+    ],
+    [
+      "f1b487b6-57b9-49c7-9e76-f70f80a0ee48",
+      "pending",
+      "0",
+      ""
+    ],
+    [
+      "3b4fb5f7-a48a-41a5-a876-a4a539fc5216",
+      "pending",
+      "0"
+    ]
+  ],
+  "analysisWork": [],
+  "submissions": [],
+  "attemptLedger": {
+    "entries": 0,
+    "uniqueTasks": 0,
+    "uniqueQuestions": 0,
+    "eachTaskOnce": false
+  },
+  "monitoringTotalCount": 0,
+  "monitoringMatchesChecks": true,
+  "spoolFiles": [
+    ".binding"
+  ],
+  "profileLocked": false,
+  "blocker": {
+    "code": "LOCAL_COLLECTOR_SCHEMA_NOT_MIGRATED",
+    "leaseHttpStatus": 500,
+    "missingMigration": "035_collector_session_profiles.sql",
+    "missingTables": [
+      "collector_session_profiles",
+      "collector_platform_dispatch_states",
+      "collector_session_health_events"
+    ],
+    "historicalAuditIncompatibilities": 1,
+    "noPromptSent": true,
+    "migrationExecuted": false
+  }
+}

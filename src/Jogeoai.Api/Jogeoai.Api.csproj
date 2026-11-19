@@ -1,0 +1,24 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <UserSecretsId>Jogeoai.Api-local-development</UserSecretsId>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.AspNetCore.OpenApi" Version="10.0.12" />
+    <PackageReference Include="ModelContextProtocol.AspNetCore" Version="2.3.1" />
+    <PackageReference Include="Swashbuckle.AspNetCore" Version="10.0.1" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Jogeoai.Application\Jogeoai.Application.csproj" />
+    <ProjectReference Include="..\Jogeoai.Infrastructure\Jogeoai.Infrastructure.csproj" />
+    <ProjectReference Include="..\Jogeoai.Providers.Cloro\Jogeoai.Providers.Cloro.csproj" />
+    <ProjectReference Include="..\Jogeoai.Providers.Domestic\Jogeoai.Providers.Domestic.csproj" />
+  </ItemGroup>
+
+</Project>

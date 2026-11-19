@@ -1,0 +1,30 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <IsPackable>false</IsPackable>
+    <!-- The isolated OpenAPI contract host uses the same XML-comment generator as the Web SDK. -->
+    <InterceptorsNamespaces>$(InterceptorsNamespaces);Microsoft.AspNetCore.OpenApi.Generated</InterceptorsNamespaces>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="coverlet.collector" Version="6.0.4" />
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />
+    <PackageReference Include="xunit" Version="2.9.3" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="3.1.4" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Using Include="Xunit" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\Jogeoai.Infrastructure\Jogeoai.Infrastructure.csproj" />
+    <ProjectReference Include="..\..\src\Jogeoai.Providers.Cloro\Jogeoai.Providers.Cloro.csproj" />
+    <ProjectReference Include="..\..\src\Jogeoai.Worker\Jogeoai.Worker.csproj" />
+    <ProjectReference Include="..\..\src\Jogeoai.Api\Jogeoai.Api.csproj" />
+  </ItemGroup>
+
+</Project>

@@ -1,0 +1,126 @@
+name: ai-visibility-collector
+
+x-app: &app
+  build:
+    context: .
+    dockerfile: infra/docker/app.Dockerfile
+  image: ai-visibility-collector:local
+  restart: unless-stopped
+
+services:
+  postgres:
+    build:
+      context: .
+      dockerfile: infra/postgres/Dockerfile
+    image: ai-visibility-collector-postgres:18.0
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_ADMIN_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_ADMIN_PASSWORD}
+      POSTGRES_APP_USER: ${POSTGRES_APP_USER}
+      POSTGRES_APP_PASSWORD: ${POSTGRES_APP_PASSWORD}
+      TZ: Asia/Shanghai
+    ports:
+      - "127.0.0.1:55432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  api:
+    <<: *app
+    command: ["node", "apps/api/dist/main.js"]
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_APP_USER}:${POSTGRES_APP_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      API_HOST: 0.0.0.0
+      API_PORT: 4311
+      COLLECTOR_CN_SERVICE_TOKEN: ${COLLECTOR_CN_SERVICE_TOKEN}
+      COLLECTOR_OVERSEAS_SERVICE_TOKEN: ${COLLECTOR_OVERSEAS_SERVICE_TOKEN}
+      TZ: Asia/Shanghai
+    ports:
+      - "127.0.0.1:4311:4311"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:4311/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))",
+        ]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+
+  worker:
+    <<: *app
+    command: ["node", "apps/worker/dist/main.js"]
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_APP_USER}:${POSTGRES_APP_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      WORKER_INTERVAL_MS: 86400000
+      TZ: Asia/Shanghai
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  collector-cn:
+    <<: *app
+    command: ["node", "apps/collector/dist/main.js"]
+    environment:
+      COLLECTOR_API_URL: http://api:4311
+      COLLECTOR_SERVICE_TOKEN: ${COLLECTOR_CN_SERVICE_TOKEN}
+      COLLECTOR_TENANT_ID: 11111111-1111-4111-8111-111111111111
+      COLLECTOR_NODE_ID: local-cn
+      COLLECTOR_REGION: cn
+      COLLECTOR_EGRESS_COUNTRY: ${COLLECTOR_CN_EGRESS_COUNTRY}
+      COLLECTOR_BUILD_REVISION: local-compose
+      COLLECTOR_SUPPORTED_PLATFORMS: doubao,ernie,zhipu_qingyan,qwen,kimi,deepseek,tencent_yuanbao
+      COLLECTOR_SPOOL_DIRECTORY: /var/lib/aivc/spool
+      COLLECTOR_SPOOL_KEY: ${COLLECTOR_SPOOL_KEY}
+      NO_PROXY: "*"
+      HTTP_PROXY: ""
+      HTTPS_PROXY: ""
+      ALL_PROXY: ""
+      TZ: Asia/Shanghai
+    volumes:
+      - collector-cn-spool:/var/lib/aivc/spool
+    depends_on:
+      api:
+        condition: service_healthy
+
+  collector-overseas:
+    <<: *app
+    command: ["node", "apps/collector/dist/main.js"]
+    environment:
+      COLLECTOR_API_URL: http://api:4311
+      COLLECTOR_SERVICE_TOKEN: ${COLLECTOR_OVERSEAS_SERVICE_TOKEN}
+      COLLECTOR_TENANT_ID: 11111111-1111-4111-8111-111111111111
+      COLLECTOR_NODE_ID: local-overseas
+      COLLECTOR_REGION: overseas
+      COLLECTOR_EGRESS_COUNTRY: ${COLLECTOR_OVERSEAS_EGRESS_COUNTRY}
+      COLLECTOR_BUILD_REVISION: local-compose
+      COLLECTOR_SUPPORTED_PLATFORMS: chatgpt,claude,gemini
+      COLLECTOR_SPOOL_DIRECTORY: /var/lib/aivc/spool
+      COLLECTOR_SPOOL_KEY: ${COLLECTOR_SPOOL_KEY}
+      HTTPS_PROXY: ${COLLECTOR_OVERSEAS_PROXY_URL:-}
+      NO_PROXY: api,postgres,127.0.0.1,localhost
+      TZ: Asia/Shanghai
+    volumes:
+      - collector-overseas-spool:/var/lib/aivc/spool
+    depends_on:
+      api:
+        condition: service_healthy
+
+volumes:
+  postgres-data:
+    name: ai-visibility-collector-postgres-data
+  collector-cn-spool:
+    name: ai-visibility-collector-cn-spool
+  collector-overseas-spool:
+    name: ai-visibility-collector-overseas-spool

@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk.Worker">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <UserSecretsId>dotnet-Jogeoai.Worker-4e794c27-e06b-4107-86b5-a5067954d6bc</UserSecretsId>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Extensions.Hosting" Version="10.0.9" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Jogeoai.Application\Jogeoai.Application.csproj" />
+    <ProjectReference Include="..\Jogeoai.Infrastructure\Jogeoai.Infrastructure.csproj" />
+    <ProjectReference Include="..\Jogeoai.Providers.Cloro\Jogeoai.Providers.Cloro.csproj" />
+    <ProjectReference Include="..\Jogeoai.Providers.Domestic\Jogeoai.Providers.Domestic.csproj" />
+  </ItemGroup>
+</Project>

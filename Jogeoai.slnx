@@ -1,0 +1,15 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/Jogeoai.Api/Jogeoai.Api.csproj" />
+    <Project Path="src/Jogeoai.Application/Jogeoai.Application.csproj" />
+    <Project Path="src/Jogeoai.Domain/Jogeoai.Domain.csproj" />
+    <Project Path="src/Jogeoai.Infrastructure/Jogeoai.Infrastructure.csproj" />
+    <Project Path="src/Jogeoai.Providers.Abstractions/Jogeoai.Providers.Abstractions.csproj" />
+    <Project Path="src/Jogeoai.Providers.Cloro/Jogeoai.Providers.Cloro.csproj" />
+    <Project Path="src/Jogeoai.Providers.Domestic/Jogeoai.Providers.Domestic.csproj" />
+    <Project Path="src/Jogeoai.Worker/Jogeoai.Worker.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/Jogeoai.Tests/Jogeoai.Tests.csproj" />
+  </Folder>
+</Solution>

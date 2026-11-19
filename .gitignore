@@ -1,0 +1,14 @@
+**/bin/
+**/obj/
+.env
+.env.*
+!.env.example
+!.env.production.example
+.local/
+.data/
+.backups/
+node_modules/
+.DS_Store
+.idea/
+*.user
+*.suo

@@ -1,0 +1,154 @@
+@Jogeoai.Api_HostAddress = http://localhost:5260
+
+### Process health
+GET {{Jogeoai.Api_HostAddress}}/health/live
+Accept: application/json
+
+### MySQL readiness (200 Healthy / 503 Unhealthy)
+GET {{Jogeoai.Api_HostAddress}}/health/ready
+
+### OpenAPI document (Development only)
+GET {{Jogeoai.Api_HostAddress}}/openapi/v1.json
+Accept: application/json
+
+### Register with email and password (returns a bearer token and sets a session cookie)
+POST {{Jogeoai.Api_HostAddress}}/api/v1/auth/register
+Content-Type: application/json
+
+{
+  "email": "owner@example.com",
+  "password": "change-me-please",
+  "displayName": "Example Team"
+}
+
+### Current authenticated user
+GET {{Jogeoai.Api_HostAddress}}/api/v1/auth/me
+Accept: application/json
+
+### Knowledge usage (replace the development tenant header when required)
+GET {{Jogeoai.Api_HostAddress}}/api/v1/knowledge/usage
+Accept: application/json
+
+### Upload a company knowledge file (PDF/DOCX/Markdown/TXT, max 100 MB)
+POST {{Jogeoai.Api_HostAddress}}/api/v1/knowledge/documents
+Idempotency-Key: knowledge-example-1
+Content-Type: multipart/form-data; boundary=knowledge-boundary
+
+--knowledge-boundary
+Content-Disposition: form-data; name="file"; filename="product.txt"
+Content-Type: text/plain
+
+Product name and supported scenarios.
+--knowledge-boundary--
+
+### Search brand knowledge (replace site ID)
+POST {{Jogeoai.Api_HostAddress}}/api/v1/sites/00000000-0000-0000-0000-000000000000/knowledge/search
+Content-Type: application/json
+
+{
+  "query": "product supported scenarios",
+  "scopeMode": "default",
+  "topK": 8
+}
+
+### Current onboarding tenant, brand and step
+GET {{Jogeoai.Api_HostAddress}}/api/v1/onboarding
+Accept: application/json
+
+### Create the first brand for the authenticated team
+POST {{Jogeoai.Api_HostAddress}}/api/v1/onboarding/brands
+Content-Type: application/json
+
+{
+  "name": "Example",
+  "primaryDomain": "example.com",
+  "reportTitle": "Example visibility report",
+  "includeSubdomains": true
+}
+
+### Read onboarding progress (replace site ID)
+GET {{Jogeoai.Api_HostAddress}}/api/v1/onboarding/00000000-0000-0000-0000-000000000000
+Accept: application/json
+
+### Start asynchronous brand research (replace site ID)
+POST {{Jogeoai.Api_HostAddress}}/api/v1/sites/00000000-0000-0000-0000-000000000000/brand-research
+Content-Type: application/json
+
+{
+  "website": "https://example.com",
+  "maxPrompts": 30,
+  "maxCompetitors": 10,
+  "refreshKey": "example-first-research"
+}
+
+### List global research Provider metadata (system-admin session required; credentials are masked)
+GET {{Jogeoai.Api_HostAddress}}/api/v1/research/providers
+Accept: application/json
+
+### Configure an OpenAI-compatible research Provider (system-admin session required)
+PUT {{Jogeoai.Api_HostAddress}}/api/v1/research/providers/openai-compatible
+Content-Type: application/json
+
+{
+  "model": "gpt-6-luna",
+  "apiUrl": "https://api.openai.com/v1/chat/completions",
+  "credential": "<provider-api-key>",
+  "enabled": true,
+  "priority": 10,
+  "webSearchEnabled": false,
+  "timeoutSeconds": 90
+}
+
+### Save Cloro global URL/switch (system-admin session; apiKey is optional and only fills the `default` pool account)
+PUT {{Jogeoai.Api_HostAddress}}/api/v1/providers/cloro/settings
+Content-Type: application/json
+
+{
+  "apiUrl": "https://api.cloro.dev/v1/async/task",
+  "enabled": true
+}
+
+### List Cloro pool accounts (system-admin session; only the last 4 key characters are returned)
+GET {{Jogeoai.Api_HostAddress}}/api/v1/providers/cloro/keys
+Accept: application/json
+
+### Add a Cloro account (one account/organization = one key; validated with GET /v1/credits unless skipValidation)
+POST {{Jogeoai.Api_HostAddress}}/api/v1/providers/cloro/keys
+Content-Type: application/json
+
+{
+  "accountLabel": "account-b",
+  "apiKey": "<cloro-key-of-another-account>",
+  "priority": 100,
+  "enabled": true,
+  "skipValidation": false
+}
+
+### Change priority / disable an account (the key itself cannot be changed)
+PATCH {{Jogeoai.Api_HostAddress}}/api/v1/providers/cloro/keys/<key-id>
+Content-Type: application/json
+
+{
+  "priority": 50,
+  "enabled": false
+}
+
+### Refresh one account's credits
+POST {{Jogeoai.Api_HostAddress}}/api/v1/providers/cloro/keys/<key-id>/refresh-credits
+
+### Archive an account (409 CLORO_KEY_IN_USE while submitted tasks still use it)
+DELETE {{Jogeoai.Api_HostAddress}}/api/v1/providers/cloro/keys/<key-id>
+
+### Pool overview
+GET {{Jogeoai.Api_HostAddress}}/api/v1/providers/cloro/pool
+Accept: application/json
+
+### Test a Cloro task (system-admin session; consumes credits of the selected account)
+POST {{Jogeoai.Api_HostAddress}}/api/v1/providers/cloro/test
+Content-Type: application/json
+
+{
+  "model": "chatgpt",
+  "prompt": "What are the best products for...",
+  "country": "US"
+}

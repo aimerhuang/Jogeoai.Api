@@ -1,0 +1,51 @@
+<!doctype html>
+<!-- Synthetic DOM: exercises observed structure, NOT proof of live selectors. -->
+<html lang="zh-CN">
+  <body>
+    <div id="authenticated">Fixture account</div>
+    <button
+      id="new"
+      onclick="document.querySelector('#messages').replaceChildren(); document.querySelector('#composer').value = ''"
+    >
+      New conversation
+    </button>
+    <textarea id="composer"></textarea><button id="quick">快速</button>
+    <button
+      id="submit"
+      onclick="document.querySelector('#messages').innerHTML = document.querySelector('#response').innerHTML"
+    >
+      Send
+    </button>
+    <div id="messages"></div>
+    <template id="response">
+      <article class="question"><div class="markdown">管道内窥镜</div></article>
+      <article class="assistant">
+        <div class="answer finished"><div class="markdown">Synthetic Ernie answer only.</div></div>
+        <ul>
+          <li
+            class="reference"
+            data-long-press-ext-info='{"link":"https://example.com/source","linkTitle":"Synthetic source"}'
+          >
+            Source snippet outside body
+          </li>
+          <li class="reference" data-long-press-ext-info='{"link":"https://example.com/source"}'>
+            Duplicate
+          </li>
+          <li
+            class="reference"
+            data-long-press-ext-info='{"link":"https://hidden.example.com/"}'
+            hidden
+          >
+            Hidden
+          </li>
+          <li
+            class="reference"
+            data-long-press-ext-info='{"link":"https://wenxin.baidu.com/chat/"}'
+          >
+            Internal
+          </li>
+        </ul>
+      </article>
+    </template>
+  </body>
+</html>

@@ -1,0 +1,331 @@
+{
+  "verifiedAt": "2026-10-28T03:04:50.910Z",
+  "siteId": "ded1a716-f791-491c-96e2-f737bb998960",
+  "run": {
+    "runId": "af5bf609-0de8-4ff2-a6ce-bfd4325b7208",
+    "siteId": "ded1a716-f791-491c-96e2-f737bb998960",
+    "status": "succeeded",
+    "totalChecks": 10,
+    "succeededChecks": 10,
+    "failedChecks": 0,
+    "createdAt": "2026-10-28T02:50:02+00:00",
+    "startedAt": "2026-10-28T02:50:42+00:00",
+    "completedAt": "2026-10-28T03:04:15+00:00",
+    "errorCode": "",
+    "errorMessage": "",
+    "provider": "domestic_collector",
+    "expectedChecks": 10,
+    "collectionCompletedChecks": 10,
+    "analysisStatus": "not_started",
+    "analyzedChecks": 0
+  },
+  "checks": [
+    {
+      "checkId": "add847d3-47cd-4171-8e28-eea0db017797",
+      "promptId": "028ad5d9-5bd5-4097-a53b-59305f21ed8f",
+      "status": "succeeded",
+      "answerChars": 1352,
+      "hasMarkdown": true,
+      "citations": 36,
+      "titledCitations": 36,
+      "webQueries": 6,
+      "queryAvailability": "available",
+      "analysis": {
+        "status": "completed",
+        "analysisVersion": 10,
+        "subjectConfigVersion": 7,
+        "configurationOutdated": false
+      },
+      "brandMentioned": true
+    },
+    {
+      "checkId": "4de277eb-a471-4383-90ae-3df56113f9cf",
+      "promptId": "0de81940-0cf6-4753-92fa-2add0a21adf1",
+      "status": "succeeded",
+      "answerChars": 929,
+      "hasMarkdown": true,
+      "citations": 34,
+      "titledCitations": 34,
+      "webQueries": 7,
+      "queryAvailability": "available",
+      "analysis": {
+        "status": "completed",
+        "analysisVersion": 10,
+        "subjectConfigVersion": 7,
+        "configurationOutdated": false
+      },
+      "brandMentioned": true
+    },
+    {
+      "checkId": "5dee4116-24a0-4647-87e4-30685699a35d",
+      "promptId": "29501069-0dba-4a4b-9d36-70e921ae2e57",
+      "status": "succeeded",
+      "answerChars": 1643,
+      "hasMarkdown": true,
+      "citations": 44,
+      "titledCitations": 44,
+      "webQueries": 8,
+      "queryAvailability": "available",
+      "analysis": {
+        "status": "completed",
+        "analysisVersion": 10,
+        "subjectConfigVersion": 7,
+        "configurationOutdated": false
+      },
+      "brandMentioned": true
+    },
+    {
+      "checkId": "81222dd2-6919-412f-a9b0-6fed5183dc0b",
+      "promptId": "480bc6e4-da6d-449c-af3f-27e2fcac3fcc",
+      "status": "succeeded",
+      "answerChars": 1028,
+      "hasMarkdown": true,
+      "citations": 32,
+      "titledCitations": 32,
+      "webQueries": 6,
+      "queryAvailability": "available",
+      "analysis": {
+        "status": "completed",
+        "analysisVersion": 10,
+        "subjectConfigVersion": 7,
+        "configurationOutdated": false
+      },
+      "brandMentioned": true
+    },
+    {
+      "checkId": "f7635ac5-7275-4785-a2bf-45668ffbaadb",
+      "promptId": "4b9dda0f-f01b-4170-8948-bc8e5f92ea31",
+      "status": "succeeded",
+      "answerChars": 985,
+      "hasMarkdown": true,
+      "citations": 32,
+      "titledCitations": 32,
+      "webQueries": 6,
+      "queryAvailability": "available",
+      "analysis": {
+        "status": "completed",
+        "analysisVersion": 10,
+        "subjectConfigVersion": 7,
+        "configurationOutdated": false
+      },
+      "brandMentioned": true
+    },
+    {
+      "checkId": "577e8afa-c716-4f35-8be1-1b9d2057c2b6",
+      "promptId": "820a0118-ad50-4fad-9d9d-257a492c1b02",
+      "status": "succeeded",
+      "answerChars": 1771,
+      "hasMarkdown": true,
+      "citations": 29,
+      "titledCitations": 29,
+      "webQueries": 8,
+      "queryAvailability": "available",
+      "analysis": {
+        "status": "completed",
+        "analysisVersion": 10,
+        "subjectConfigVersion": 7,
+        "configurationOutdated": false
+      },
+      "brandMentioned": true
+    },
+    {
+      "checkId": "c5ad4f17-c81b-4e79-819a-61801d7f7b50",
+      "promptId": "91400724-e821-4523-98ae-6668cc24a5cb",
+      "status": "succeeded",
+      "answerChars": 1233,
+      "hasMarkdown": true,
+      "citations": 48,
+      "titledCitations": 48,
+      "webQueries": 8,
+      "queryAvailability": "available",
+      "analysis": {
+        "status": "completed",
+        "analysisVersion": 10,
+        "subjectConfigVersion": 7,
+        "configurationOutdated": false
+      },
+      "brandMentioned": false
+    },
+    {
+      "checkId": "15f1193a-3411-4832-a798-37a244d19ff3",
+      "promptId": "acbdfbcc-07c5-4ac6-b714-753a041e25ad",
+      "status": "succeeded",
+      "answerChars": 1297,
+      "hasMarkdown": true,
+      "citations": 35,
+      "titledCitations": 35,
+      "webQueries": 6,
+      "queryAvailability": "available",
+      "analysis": {
+        "status": "completed",
+        "analysisVersion": 10,
+        "subjectConfigVersion": 7,
+        "configurationOutdated": false
+      },
+      "brandMentioned": true
+    },
+    {
+      "checkId": "faf2b4a9-c38c-4b75-bcee-f779471c2ab6",
+      "promptId": "b319d9c7-2c16-4287-83d0-d96643fe96d5",
+      "status": "succeeded",
+      "answerChars": 2105,
+      "hasMarkdown": true,
+      "citations": 45,
+      "titledCitations": 45,
+      "webQueries": 8,
+      "queryAvailability": "available",
+      "analysis": {
+        "status": "completed",
+        "analysisVersion": 10,
+        "subjectConfigVersion": 7,
+        "configurationOutdated": false
+      },
+      "brandMentioned": true
+    },
+    {
+      "checkId": "f187a3f2-facc-460a-8749-54709218f4d8",
+      "promptId": "f041504f-7e21-488e-9548-fa61c1dcaa22",
+      "status": "succeeded",
+      "answerChars": 917,
+      "hasMarkdown": true,
+      "citations": 33,
+      "titledCitations": 33,
+      "webQueries": 6,
+      "queryAvailability": "available",
+      "analysis": {
+        "status": "completed",
+        "analysisVersion": 10,
+        "subjectConfigVersion": 7,
+        "configurationOutdated": false
+      },
+      "brandMentioned": true
+    }
+  ],
+  "tasks": [
+    [
+      "9956bede-c645-4ef0-bc5e-025113733c1f",
+      "succeeded",
+      "1",
+      ""
+    ],
+    [
+      "c10c62c9-9211-4e56-b562-6a9cdc1a885d",
+      "succeeded",
+      "1",
+      ""
+    ],
+    [
+      "d26dd1f3-db68-4646-a942-499950b56ddc",
+      "succeeded",
+      "1",
+      ""
+    ],
+    [
+      "3b93bc51-71c1-4dd1-bc50-d834dad3ee9b",
+      "succeeded",
+      "1",
+      ""
+    ],
+    [
+      "b0283951-fcad-4f80-ad07-59b94623b0fd",
+      "succeeded",
+      "2",
+      ""
+    ],
+    [
+      "78439136-3631-4352-aaec-9b124d9cecf6",
+      "succeeded",
+      "1",
+      ""
+    ],
+    [
+      "a3630fa1-f622-4714-8fd4-36018719328f",
+      "succeeded",
+      "1",
+      ""
+    ],
+    [
+      "dce44f29-e9ff-4b67-8296-f1ab8703cc49",
+      "succeeded",
+      "1",
+      ""
+    ],
+    [
+      "4db04805-0927-4342-a4b3-49d80d1f20e9",
+      "succeeded",
+      "1",
+      ""
+    ],
+    [
+      "b37845b9-e734-4791-8a1e-41190600a62f",
+      "succeeded",
+      "1"
+    ]
+  ],
+  "analysisWork": [
+    [
+      "completed",
+      "10"
+    ]
+  ],
+  "submissions": [
+    [
+      "accepted",
+      "10"
+    ]
+  ],
+  "attemptLedger": {
+    "entries": 11,
+    "uniqueTasks": 10,
+    "uniqueQuestions": 10,
+    "eachTaskOnce": false
+  },
+  "priorArchive": [
+    [
+      "8945d0f2-8ea0-4f8b-afcc-27e0ff71878d",
+      "terminal_failed",
+      "operator_archived"
+    ]
+  ],
+  "monitoringTotalCount": 10,
+  "monitoringMatchesChecks": true,
+  "spoolFiles": [
+    ".binding"
+  ],
+  "profileLocked": false,
+  "runtime": {
+    "apiReadiness": "Healthy",
+    "apiRunning": true,
+    "workerRunning": true,
+    "collectorAndLoginProcessesRunning": false,
+    "driverExitCode": 0
+  },
+  "manualVerification": {
+    "taskId": "b0283951-fcad-4f80-ad07-59b94623b0fd",
+    "failureCode": "challenge_required",
+    "completedBy": "user",
+    "stoppedConversationInspection": {
+      "userMessages": 0,
+      "assistantMessages": 0,
+      "authenticated": true,
+      "challengeVisible": false,
+      "iframeChallengeVisible": false
+    },
+    "resumedThrough": "normal lease after expiry",
+    "finalAttemptCount": 2
+  },
+  "archive": {
+    "taskId": "8945d0f2-8ea0-4f8b-afcc-27e0ff71878d",
+    "runId": "87e1e491-e34e-47b9-9b82-5fccb643be04",
+    "status": "terminal_failed",
+    "reason": "operator_archived",
+    "staleLockArchived": true,
+    "successfulAnswersPreserved": true
+  },
+  "validation": {
+    "codeTestsRun": false,
+    "reason": "仅运行采集、归档已授权旧任务及同步文档，未修改业务源码。",
+    "runSummaryAnalysisCounterKnownInaccurate": true,
+    "analysisEvidence": "逐条回答详情与analysis_check_work均为10条completed"
+  }
+}

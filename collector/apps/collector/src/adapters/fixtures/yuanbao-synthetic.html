@@ -1,0 +1,73 @@
+<!doctype html>
+<!-- Synthetic test-only content modeling the reviewed layout; never live-page proof. -->
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+  </head>
+  <body>
+    <div id="authenticated">Synthetic authorized Yuanbao account</div>
+    <button
+      id="new"
+      onclick="document.querySelector('#messages').replaceChildren(); document.querySelector('#composer').value = ''"
+    >
+      New conversation
+    </button>
+    <textarea id="composer"></textarea>
+    <div id="conversation-active">Default conversation active; network use unverified</div>
+    <button
+      id="submit"
+      onclick="document.querySelector('#messages').innerHTML = document.querySelector('#answer-template').innerHTML"
+    >
+      Send
+    </button>
+    <div id="messages"></div>
+    <div id="drawers"></div>
+    <template id="answer-template">
+      <article class="assistant agent-chat__list__item--ai">
+        <div class="answer">Synthetic Tencent Yuanbao answer for fixture testing only.</div>
+        <a class="citation" href="https://example.com/yuanbao-source">Source</a>
+        <a class="citation" href="https://example.com/yuanbao-source">Duplicate source</a>
+        <a class="citation" href="https://yuanbao.tencent.com/internal" hidden>Hidden link</a>
+        <span class="complete">Complete</span>
+        <button
+          aria-label="引用2篇资料作为参考"
+          onclick="document.querySelector('#drawers').innerHTML = document.querySelector('#sources-template').innerHTML"
+        >
+          源
+        </button>
+      </article>
+    </template>
+    <template id="sources-template">
+      <div class="t-drawer--open">
+        <section class="agent-dialogue-references">
+          <div class="agent-dialogue-references__close" style="width: 180px">
+            <button
+              style="float: right"
+              onclick="document.querySelector('#drawers').replaceChildren()"
+            >
+              Close
+            </button>
+          </div>
+          <ul>
+            <li class="agent-dialogue-references__item">
+              <div
+                class="hyc-common-markdown__ref_card"
+                data-url="https://example.com/yuanbao-source"
+              >
+                <h4 class="hyc-common-markdown__ref_card-title">First source title</h4>
+              </div>
+            </li>
+            <li class="agent-dialogue-references__item">
+              <div
+                class="hyc-common-markdown__ref_card"
+                data-url="https://second.example.com/source"
+              >
+                <h4 class="hyc-common-markdown__ref_card-title">Second source title</h4>
+              </div>
+            </li>
+          </ul>
+        </section>
+      </div>
+    </template>
+  </body>
+</html>

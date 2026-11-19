@@ -1,0 +1,71 @@
+<!doctype html>
+<!-- Synthetic DOM mirroring the 2026-10-22 smart-search structure (footer "N 个网页", "搜索结果"
+     side panel of a[href] cards with .search-view-card__title). NOT proof of live selectors. -->
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+  </head>
+  <body>
+    <div id="authenticated">Fixture account</div>
+    <button
+      id="new"
+      onclick="document.querySelector('#messages').replaceChildren(); document.querySelector('#composer').value = ''"
+    >
+      开启新对话
+    </button>
+    <textarea id="composer"></textarea>
+    <div id="mode">
+      <div class="ds-toggle-button" role="button">深度思考</div>
+      <div class="ds-toggle-button ds-toggle-button--selected" role="button">智能搜索</div>
+    </div>
+    <button
+      id="submit"
+      onclick="document.querySelector('#messages').innerHTML = document.querySelector('#answer-template').innerHTML"
+    >
+      Send
+    </button>
+    <div id="messages"></div>
+    <div id="sidebar"></div>
+    <template id="answer-template">
+      <article class="assistant">
+        <div class="think">已思考（用时 7 秒）搜索到 2 个网页</div>
+        <div class="answer">
+          <h3>推荐厂家</h3>
+          <p>
+            <strong>优联科技</strong>：推杆式<span data-citation-group="1"
+              ><a href="https://example.com/first"
+                ><span class="ds-markdown-cite">-1</span></a
+              ></span
+            >
+          </p>
+        </div>
+        <div class="complete">
+          <span role="button">复制</span>
+          <span
+            class="count"
+            onclick="document.querySelector('#sidebar').innerHTML = document.querySelector('#panel-template').innerHTML"
+            >2 个网页</span
+          >
+        </div>
+      </article>
+    </template>
+    <template id="panel-template">
+      <div class="panel">
+        <div class="header">
+          <div role="heading">搜索结果</div>
+          <div role="button" onclick="document.querySelector('#sidebar').replaceChildren()">×</div>
+        </div>
+        <a href="https://example.com/first" target="_blank"
+          ><div>
+            <span>Example</span><span>2026/10/01</span><span class="ds-markdown-cite">1</span>
+          </div>
+          <div class="search-view-card__title">First source title</div>
+          <div class="search-view-card__snippet">Snippet one</div></a
+        >
+        <a href="https://example.org/second" target="_blank"
+          ><div class="search-view-card__title">Second source title</div></a
+        >
+      </div>
+    </template>
+  </body>
+</html>
