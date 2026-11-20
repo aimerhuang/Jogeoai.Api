@@ -271,7 +271,7 @@ launchctl bootout gui/$(id -u)/com.aivc.app-node   # 停止
 | `/swagger/index.html` | 404（Production 关闭） |
 | 匿名 `GET /api/v1/auth/me` | 401 |
 | Worker | 启动并持续运行，日志显示 MySQL 连接与后台 Worker 已启动 |
-| 采集端镜像（profile `collector`） | **未验证**：两次构建都在从 Docker Hub 下载 Node 基础镜像时超时（`DeadlineExceeded`），属于本机网络问题；Dockerfile 是采集端原有的 `collector/infra/docker/app.Dockerfile`，未改动 |
+| 采集端镜像（profile `collector`） | 成功（2026-11-20 重新构建，前两次因 Docker Hub 网络超时失败）：821 MB，Node v24.22.3，以 `node` 用户运行，`apps/{collector,api,worker}/dist` 都在；镜像内没有 adb、Chromium 或 Playwright 浏览器 |
 
 实测中发现并已修复：镜像内 mysql 客户端默认 latin1，043 迁移在初始化时失败；失败后容器自动重启，又对**只迁移了一半的库**报告 healthy。现在客户端字符集固定为 utf8mb4，并用完成标记阻止这种情况。
 
