@@ -117,6 +117,44 @@ public sealed class SessionAuthorizationEndpointTests : IAsyncLifetime
         var session = program.IndexOf("app.UseMiddleware<SessionAuthenticationMiddleware>();", StringComparison.Ordinal);
         var authorization = program.IndexOf("app.UseAuthorization();", StringComparison.Ordinal);
         Assert.True(session >= 0 && authorization > session, "UseAuthorization 必须位于会话中间件之后。");
+
+        // 受信转发头必须是第一个中间件：之后的 CORS、会话、限流分区与 HTTPS 重定向才会读到处理后的客户端 IP 与协议。
+        // 按行判断，只看真正的语句：被注释掉的调用不算数；带缩进的调用（位于 if 等代码块内）不算“无条件的第一个”。
+        Assert.False(program.Contains("/*", StringComparison.Ordinal), "Program.cs 不使用块注释；否则下面按行的顺序断言会把注释里的调用当成语句。");
+        var statements = program.Split('\n')
+            .Select(line => line.TrimEnd('\r'))
+            .Where(line => !line.TrimStart().StartsWith("//", StringComparison.Ordinal))
+            .ToArray();
+        Assert.Contains("builder.Services.AddJogeoaiForwardedHeaders(builder.Configuration);", statements);
+        // 只能经由 UseJogeoaiForwardedHeaders 注册：直接调用框架的 UseForwardedHeaders 会绕过“未配置即不注册”和默认可信项的清理。
+        Assert.DoesNotContain(statements, line => line.Contains(".UseForwardedHeaders(", StringComparison.Ordinal));
+
+        var pipeline = statements
+            .Select(line => (Text: line.Trim(), Indented: line.Length > 0 && char.IsWhiteSpace(line[0])))
+            .Where(item => item.Text.StartsWith("app.Use", StringComparison.Ordinal)
+                || item.Text.StartsWith("app.Map", StringComparison.Ordinal)
+                || item.Text.StartsWith("app.Run", StringComparison.Ordinal))
+            .ToArray();
+        const string forwardedCall = "app.UseJogeoaiForwardedHeaders();";
+        Assert.True(
+            pipeline.Length > 0 && pipeline[0].Text.StartsWith(forwardedCall, StringComparison.Ordinal) && !pipeline[0].Indented,
+            "app.UseJogeoaiForwardedHeaders() 必须是管道中无条件注册的第一个中间件（位于所有 app.Use / app.Map / app.Run 之前）。");
+        // 重复注册会让同一个请求被处理两次，实际跳数变成 ForwardLimit 的两倍。
+        Assert.Single(statements, line => line.Contains("UseJogeoaiForwardedHeaders", StringComparison.Ordinal));
+        foreach (var later in new[]
+                 {
+                     "app.UseCors(",
+                     "app.UseMiddleware<SessionAuthenticationMiddleware>(",
+                     "app.UseMcpTokenAuthentication(",
+                     "app.UseRateLimiter(",
+                     "app.UseHttpsRedirection(",
+                     "app.UseAuthorization(",
+                 })
+        {
+            Assert.True(
+                pipeline.Skip(1).Any(item => item.Text.StartsWith(later, StringComparison.Ordinal)),
+                $"{later.TrimEnd('(')} 必须存在并位于 UseJogeoaiForwardedHeaders 之后。");
+        }
     }
 
     [Fact]

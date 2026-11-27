@@ -706,6 +706,8 @@ export async function runNode(options: NodeOptions): Promise<NodeResult> {
         binding,
         questionText: task.questionText,
         signal: AbortSignal.any([attemptAbort.signal, graceOver.signal]),
+        // A stop request at once, so that what can be cut short ends before the grace period.
+        stopping: options.stop,
         onSendIntent: async () => {
           assertLiveLease();
           current = { ...current, sendState: "unknown", updatedAt: now().toISOString() };

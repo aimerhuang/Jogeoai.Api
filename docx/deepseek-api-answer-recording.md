@@ -11,7 +11,7 @@ Trellis 任务：`10-23-deepseek-api-provider`。网页采集通道见 [DeepSeek
 | 默认模型 | `deepseek-flash`，`thinking.type=disabled`（与网页实采的「智能搜索开、深度思考关」一致），单次回答最多搜索 5 次（`max_uses`） |
 | 解析器 | `deepseek-api-v1`（`DeepSeekAnthropicAdapter`） |
 | 执行 | `DeepSeekApiTaskWorker` 领取 `provider_tasks`，同步调用一次，通过 `CompleteSynchronousTaskAsync` 在一个事务里写入结果、引用、用量和分析工作项 |
-| 积分 | 与 Cloro、豆包同价：每日监控按「问题 × 目标 × 样本」预留并结算 10 积分；手动 Run 不预留积分 |
+| 积分 | 与 Cloro、豆包同价：每日监控按「问题 × 目标 × 样本」预留并结算 10 积分；手动 Run 自 2026-11-27 起同价预留，余额不足返回 402 `CREDIT_INSUFFICIENT`（Trellis `11-27-sec-manual-run-charging`，代码已实现，本机 API / Worker 尚未用该构建重启；见[品牌监控配置说明](brand-monitoring-config.md) §4、§9），在此之前不预留，§4 的实测记录属于这一时期 |
 | 设置 | `answer_provider_settings` 中 `provider='deepseek_api'` 这一行（迁移 030 插入种子） |
 
 ## 2. 配置

@@ -348,6 +348,61 @@ only synthetic fixtures.
   one; some answer controls sit under the App's shortcut bar until then.
 - Do not send a question only to discover selectors more than once per App. A discovery
   attempt is recorded as a failed attempt and counts against the limits.
+- Where the source panel lists titles only, `links` in a source path has every source opened to
+  read its link through the App's own share sheet: the title is tapped, the page it opens is
+  shared with "copy link", the clipboard is read through the driver, and the page is left for
+  the panel again. Doubao 15.7.0 (task 11-24, real device): a title opens the App's own page
+  without an address bar; its top bar has a share control, and the share sheet has "复制链接".
+  The values below are illustrative; review them on the App before you write them:
+
+  ```json
+  "links": {
+    "page": { "id": "com.larus.nova:id/btn_back" },
+    "share": { "id": "com.larus.nova:id/btn_share" },
+    "copy": { "text": "复制链接" },
+    "close": { "back": true },
+    "budgetSeconds": 180,
+    "unwrap": [{ "host": "link.wtturl.cn", "param": "target" }],
+    "dropParams": ["use_xbridge3", "loader_name", "need_sec_link", "sec_link_scene", "theme"],
+    "systemShare": {
+      "package": "com.android.intentresolver",
+      "copy": { "id": "com.android.intentresolver:id/copy" }
+    }
+  }
+  ```
+
+  - `links` needs `itemTitle` (the title view is what is tapped) and cannot be combined with
+    `cards` or `via`.
+  - `budgetSeconds` (30 to 600, default 180) bounds the time spent on the links of one answer.
+    An answer can list dozens of sources (69 on 11-24) at about 4 to 7 s each, and the device
+    runs nothing else meanwhile. Sources not opened in time keep their titles (`time_budget`).
+  - `unwrap` and `dropParams` restore the source's own address from the copied text, offline:
+    the App can wrap the address in a redirect of its own (`target` holds it, URL-encoded) or
+    append parameters of its own after the source's. Only the listed parameter names are
+    removed; one wrapper layer is undone. Nothing is fetched and no short link is followed.
+  - The clipboard is read through the driver only. Bringing another App to the front, even for
+    a moment, closed Doubao's page and the panel behind it.
+  - Android's clipboard preview covers the lower left of the screen for a few seconds after
+    every copy, which is where the share sheet's "copy link" sits. The script waits for the
+    sheet to stop moving before it taps, checks that the clipboard changed, and taps once more
+    if it did not.
+  - The same preview also swallows a swipe made while it shows (real device, 11-25: right after
+    "copy link" a swipe left the source list where it was; the same swipe some 12 s later
+    scrolled it), and it can hide the views under it. Before the read ends because the list no
+    longer moves while sources are left, the script waits once for the preview to go and swipes
+    once more; only a list that still does not move ends the read.
+  - `systemShare` (optional): for some sources the page's share control brings up Android's own
+    share sheet instead of the App's (smoke 11-25, Doubao 15.7.0, Android 15:
+    `com.android.intentresolver`). Between the share tap and the clipboard read that package
+    may be in front, and its copy button is used. Without `systemShare`, or when its copy fails,
+    the sheet is left with the back key and the source gets `share_external`; the sample is
+    kept.
+  - Any other App that comes to the front during the link read (a source opening another App)
+    is left with the back key, at most twice, and the source gets `left_app`. A blocker or a
+    system dialog is looked for first and keeps its own class; the back key is never pressed on
+    one. An App that will not give way is `app_crashed` as before.
+  - A contract without `links` reads sources exactly as before, and its records do not change.
+  - Rolling back: remove `links` from the private contract. No code change is needed.
 
 ## Failure classes and what to do
 
@@ -432,6 +487,74 @@ closes that list's screens only, and the checks above hold for the screens of ev
 crash or blocker fails the attempt and stops the remaining lists, and no sample is saved while
 a screen of any list is still open. The report counts by `citationsStatus` only. A failed
 record has neither field; sources it had read by then keep their `list`.
+
+### Links read by opening sources
+
+With `links` in the contract, the links are read only after the list was read whole and its
+count checked. A link that is not got never fails the sample: the source keeps its title, its
+`url` stays as the panel showed it (null for Doubao), and `link` holds the cause. Every source
+of such a list carries `link`:
+
+- `{ "copied": "<clipboard text>", "restored": true }`: `url` is the source's address restored
+  from the copied text.
+- `{ "copied": "<clipboard text>", "restored": false }`: the text could not be restored by the
+  contract's rules (an unknown wrapper, a wrapper without its parameter). `url` is the copied
+  text as it is.
+- `{ "issue": "<cause>" }`: no link; `url` as above.
+
+| Cause                 | Meaning                                                                                     |
+| --------------------- | ------------------------------------------------------------------------------------------- |
+| `page_not_opened`     | a tap on the title, and a second one once the panel was at rest, opened no page             |
+| `share_missing`       | the page showed no share control                                                            |
+| `copy_missing`        | the share sheet showed no "copy link"                                                       |
+| `clipboard_unchanged` | after two copies the clipboard still held the previous link                                 |
+| `not_a_link`          | the copy gave something that is not a web address                                           |
+| `page_not_closed`     | the page, or the panel behind it, did not come back; no later source was opened             |
+| `not_attempted`       | not opened: an earlier page did not close, a stop was requested, or a driver command failed |
+| `not_reached`         | not opened: the list stopped moving before its row came on screen whole                     |
+| `time_budget`         | not opened: `budgetSeconds` was used up                                                     |
+| `row_not_found`       | its row was on screen but could not be found again to tap it                                |
+| `share_external`      | the share control brought up another App's sheet (Android's), undeclared or its copy failed |
+| `left_app`            | another App came to the front after the source was opened; it was left with the back key    |
+
+The same source listed twice in a row gives the same link twice; that is not
+`clipboard_unchanged`.
+
+A page that does not close is handled like a source panel left open: the clean-up leaves it
+(the contract's close, then the back key, never on a blocker), and the attempt fails
+`answer_end_not_visible` while a page or panel is still on screen. A login, verification,
+rate-limit or emulator notice on a page keeps its own class.
+
+A stop request (Ctrl-C, or a stop in `serve`) ends the link read before the next source, so the
+answer is still saved within the grace period; the sources not opened are `not_attempted`.
+
+A failed driver command during the link read ends it too, without giving up the list: the titles
+and the links read so far are kept, the source in hand and those after it are `not_attempted`,
+and the clean-up then decides as for a page that did not close.
+
+Log lines, without titles, links or any other screen text:
+
+- `app_citation_link_missing`: one per source without a link: `answerId`, `list` (several
+  lists only), `index` (from 1, in list order), `issue`.
+- `app_citation_links`: one per list: `answerId`, `list` (several lists only), `total`,
+  `withUrl`, `restored`, `elapsedMs`, and `stoppedBy` (`time_budget`, `stop_requested`,
+  `page_not_closed`, `list_not_moving` or `driver_error`) when the read ended early. With
+  `driver_error` it also carries `driver: { command, errorName }`.
+  Where the read ended early or left a source `not_reached`, the line also carries `screens`:
+  one entry per screen of the list (the last 30; `screensDropped` counts earlier ones), each
+  `{ all, whole, at, next, opened, waited }` (title views seen, those not cut by the list's
+  edge, the list position the screen aligned to or null, the first source not yet handled, how
+  many were opened, whether the clipboard-preview wait ran). With `list_not_moving`, `listStop`
+  says which condition held: `no_titles`, `unmoved` or `screen_limit`.
+
+A read that ends with `list_not_moving` also saves `links-stop.png` and `links-stop.xml` in the
+record directory, taken at that moment, and the record names them in `linkStop`. They show the
+screen as it was, account nickname included: keep them in the evidence directory. They are not
+uploaded. A capture that fails leaves `null` and does not affect the sample.
+
+`collector:app:report` adds `links` to every platform: `sources` (sources of valid samples that
+carry `link`), `withUrl`, `notRestored`, and `issues` by cause. Records without `link` are not
+counted.
 
 ## After an interruption
 

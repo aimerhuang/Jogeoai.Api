@@ -1,6 +1,7 @@
 using Jogeoai.Application;
 using Jogeoai.Domain;
 using Jogeoai.Infrastructure;
+using Microsoft.Extensions.Options;
 using MySqlConnector;
 
 namespace Jogeoai.Tests;
@@ -21,17 +22,23 @@ public sealed class BrandResearchStoreTests
         {
             Assert.True(await reader.ReadAsync()); tenant = Guid.Parse(reader.GetString(0)); site = Guid.Parse(reader.GetString(1)); user = Guid.Parse(reader.GetString(2));
         }
-        var store = new ResearchStore(new MySqlDatabase(connectionString));
+        // 本用例借用库内已有的租户与站点，无法控制它在最近 24 小时内已有多少任务，所以放开每日次数；每站点 1 个进行中任务保持默认值。
+        // 额度本身的断言见 BrandResearchQuotaSqlTests（自建租户）。
+        var store = new ResearchStore(new MySqlDatabase(connectionString),
+            quota: Options.Create(new ResearchQuotaOptions { DailyPerTenant = int.MaxValue }));
         var request = BrandResearchProviderTests.Request with { RefreshKey = $"research-test-{Guid.NewGuid():N}" };
         var job = await store.EnqueueAsync(tenant, site, user, request);
+        // 借用的站点上留下 pending / running 任务会让下一次运行的第一次入队直接得到 RESEARCH_ALREADY_ACTIVE，所以两条任务都在 finally 里取消。
+        Guid? nextJobId = null;
         try
         {
             Assert.Equal(job.JobId, (await store.EnqueueAsync(tenant, site, user, request)).JobId);
             Assert.Equal(409, (await Assert.ThrowsAsync<CollectorStoreException>(() => store.EnqueueAsync(tenant, site, user, request with { Market = "US" }))).StatusCode);
             Assert.Null(await store.GetAsync(Guid.NewGuid(), site, job.JobId));
             Assert.Null(await store.GetAsync(tenant, Guid.NewGuid(), job.JobId));
-            Assert.Equal(404, (await Assert.ThrowsAsync<CollectorStoreException>(() => store.EnqueueAsync(tenant, site, user,
-                request with { RefreshKey = Guid.NewGuid().ToString(), ReuseJobId = Guid.NewGuid() }))).StatusCode);
+            // 任务仍在等待：换一个 refreshKey 的新请求先被站点额度拒绝（早于 reuseJobId 校验），并带回现有任务。
+            Assert.Equal(job.JobId, (await Assert.ThrowsAsync<ResearchAlreadyActiveException>(() => store.EnqueueAsync(tenant, site, user,
+                request with { RefreshKey = Guid.NewGuid().ToString(), ReuseJobId = Guid.NewGuid() }))).JobId);
             var lease = await store.LeaseAsync("lease-test", TimeSpan.FromMinutes(3));
             Assert.NotNull(lease); Assert.Equal(job.JobId, lease.JobId);
             var context = BrandResearchProviderTests.Context() with { Phase = "profiling" };
@@ -51,8 +58,12 @@ public sealed class BrandResearchStoreTests
             Assert.False(await store.SaveProgressAsync(job.JobId, lease.LeaseOwner, context));
             await store.CompleteAsync(job.JobId, newLease.LeaseOwner, result);
             Assert.Equal(BrandResearchJobStatus.Done, (await store.GetAsync(tenant, site, job.JobId))!.Status);
+            // 上一条已完成、站点没有进行中的任务时，才会走到 reuseJobId 校验。
+            Assert.Equal(404, (await Assert.ThrowsAsync<CollectorStoreException>(() => store.EnqueueAsync(tenant, site, user,
+                request with { RefreshKey = Guid.NewGuid().ToString(), ReuseJobId = Guid.NewGuid() }))).StatusCode);
             var next = await store.EnqueueAsync(tenant, site, user, request with
             { RefreshKey = Guid.NewGuid().ToString(), ReuseJobId = job.JobId, BusinessDescription = "只提供排水管摄像头", Feedback = [new("旧问题", "generic")] });
+            nextJobId = next.JobId;
             var nextResult = (await store.GetAsync(tenant, site, next.JobId))!;
             Assert.Contains("管道摄像头如何选？", nextResult.Research!.ExcludedQuestions);
             Assert.Equal("只提供排水管摄像头", nextResult.Research.BusinessDescription);
@@ -66,7 +77,11 @@ public sealed class BrandResearchStoreTests
             await store.CompleteAsync(next.JobId, nextLease.LeaseOwner, result);
             Assert.Equal(BrandResearchJobStatus.Cancelled, (await store.GetAsync(tenant, site, next.JobId))!.Status);
         }
-        finally { await store.CancelAsync(tenant, site, job.JobId); }
+        finally
+        {
+            await store.CancelAsync(tenant, site, job.JobId);
+            if (nextJobId is { } leftover) await store.CancelAsync(tenant, site, leftover);
+        }
     }
 
     /// <summary>
@@ -133,6 +148,8 @@ public sealed class BrandResearchStoreTests
             var edited = await items.UpdateAsync(tenant, site, intro.ItemId, user,
                 new BrandKnowledgeItemUpdate(BrandKnowledgeDimension.BrandIntro, "公司介绍", "检测品牌只做排水管道摄像头。", intro.Version));
             await items.DeleteAsync(tenant, site, faq.ItemId, user);
+            // 每个站点同时只允许一个进行中的任务：先取消上一轮，已取消的任务仍可作为 reuseJobId 的来源。
+            Assert.True(await store.CancelAsync(tenant, site, first.JobId));
             var next = await store.EnqueueAsync(tenant, site, user, request with { RefreshKey = Guid.NewGuid().ToString(), ReuseJobId = first.JobId });
             var nextContext = (await store.GetAsync(tenant, site, next.JobId))!.Research!;
             var nextEvidence = Assert.Single(nextContext.Evidence);

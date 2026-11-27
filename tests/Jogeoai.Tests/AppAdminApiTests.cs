@@ -38,6 +38,7 @@ public sealed class AppAdminApiTests
             (nameof(c.RotateNodeToken), (await c.RotateNodeToken("node-a", default)).Result!),
             (nameof(c.DisableNode), (await c.DisableNode("node-a", default)).Result!),
             (nameof(c.ResumeNode), (await c.ResumeNode("node-a", default)).Result!),
+            (nameof(c.SetNodeMaxDevices), (await c.SetNodeMaxDevices("node-a", new(6), default)).Result!),
             (nameof(c.ListBindings), (await c.ListBindings(null, null, null, default)).Result!),
             (nameof(c.DisableBinding), (await c.DisableBinding(binding, default)).Result!),
             (nameof(c.ResumeBinding), (await c.ResumeBinding(binding, default)).Result!),
@@ -122,12 +123,53 @@ public sealed class AppAdminApiTests
         AssertError((await f.Controller.SetPlatformLimits("doubao", new(null, 5), default)).Result!, 400, "INVALID_APP_LIMITS");
         AssertError((await f.Controller.DailyReport("2026/11/17", default)).Result!, 400, "INVALID_FILTER");
         AssertError((await f.Controller.ExcludePrompt(null!, default)).Result!, 400, "INVALID_REQUEST");
+        // The device cap: missing, null, 0, 65 and negative values never reach a store.
+        AssertError((await f.Controller.SetNodeMaxDevices("node-a", null!, default)).Result!, 400, "INVALID_APP_LIMITS");
+        foreach (var value in new int?[] { null, 0, 65, -1, int.MaxValue })
+            AssertError((await f.Controller.SetNodeMaxDevices("node-a", new(value), default)).Result!, 400, "INVALID_APP_LIMITS");
         Assert.Empty(f.AllStoreCalls());
         // The store's own errors keep their shape.
         f.Reports.Handlers[nameof(IAppDailyReportStore.GetAsync)] = _ => Task.FromResult<AppDailyReportView?>(null);
         AssertError((await f.Controller.DailyReport("2026-11-17", default)).Result!, 404, "APP_DAILY_REPORT_NOT_FOUND");
         f.Admin.Handlers[nameof(IAppCollectorAdminStore.ListNodesAsync)] = _ => throw new CollectorStoreException("APP_CHANNEL_SCHEMA_NOT_MIGRATED", "x", 503);
         AssertError((await f.Controller.ListNodes(default)).Result!, 503, "APP_CHANNEL_SCHEMA_NOT_MIGRATED");
+    }
+
+    // RF2: the device cap is set per node by a system administrator. The store's refusals keep their shape: lowering the
+    // cap below the devices already registered is a 409 and the node is not read back.
+    [Fact]
+    public async Task TheDeviceCapIsPassedToTheStoreAndItsConflictsKeepTheirShape()
+    {
+        var f = new Fixture();
+        foreach (var value in new[] { 1, 6, 64 })
+        {
+            var change = Assert.IsType<AppNodeChange>(Assert.IsType<OkObjectResult>(
+                (await f.Controller.SetNodeMaxDevices("node-a", new(value), default)).Result).Value);
+            Assert.True(change.Changed);
+            Assert.Equal("node-a", change.Node.NodeId);
+            var call = f.Admin.Calls.Last(item => item.Method == nameof(IAppCollectorAdminStore.SetNodeMaxDevicesAsync));
+            Assert.Equal(("node-a", value, (Guid?)f.UserId), ((string)call.Args[0]!, (int)call.Args[1]!, (Guid?)call.Args[2]));
+        }
+        // Only the two admin-store calls per request: the write, then the read of the node.
+        Assert.Equal([nameof(IAppCollectorAdminStore.SetNodeMaxDevicesAsync), nameof(IAppCollectorAdminStore.GetNodeAsync)],
+            f.AllStoreCalls().Distinct());
+        var json = JsonSerializer.SerializeToNode(Assert.IsType<OkObjectResult>(
+            (await f.Controller.SetNodeMaxDevices("node-a", new(6), default)).Result).Value, AppCycleRunApi)!;
+        Assert.Equal((true, 6), ((bool)json["changed"]!, (int)json["node"]!["maxDevices"]!));
+
+        var reads = f.Admin.Count(nameof(IAppCollectorAdminStore.GetNodeAsync));
+        f.Admin.Handlers[nameof(IAppCollectorAdminStore.SetNodeMaxDevicesAsync)] = _
+            => throw new CollectorStoreException("APP_NODE_MAX_DEVICES_BELOW_REGISTERED", "x", 409);
+        AssertError((await f.Controller.SetNodeMaxDevices("node-a", new(1), default)).Result!, 409, "APP_NODE_MAX_DEVICES_BELOW_REGISTERED");
+        Assert.Equal(reads, f.Admin.Count(nameof(IAppCollectorAdminStore.GetNodeAsync)));
+        f.Admin.Handlers[nameof(IAppCollectorAdminStore.SetNodeMaxDevicesAsync)] = _ => throw new CollectorStoreException("APP_NODE_NOT_FOUND", "x", 404);
+        AssertError((await f.Controller.SetNodeMaxDevices("missing", new(4), default)).Result!, 404, "APP_NODE_NOT_FOUND");
+        f.Admin.Handlers[nameof(IAppCollectorAdminStore.SetNodeMaxDevicesAsync)] = _
+            => throw new CollectorStoreException("APP_CHANNEL_SCHEMA_NOT_MIGRATED", "x", 503);
+        AssertError((await f.Controller.SetNodeMaxDevices("node-a", new(4), default)).Result!, 503, "APP_CHANNEL_SCHEMA_NOT_MIGRATED");
+
+        var route = typeof(AppCollectorAdminController).GetMethod(nameof(AppCollectorAdminController.SetNodeMaxDevices))!;
+        Assert.Equal("nodes/{nodeId}/max-devices", Assert.Single(route.GetCustomAttributes<HttpPutAttribute>()).Template);
     }
 
     // PRD A10: the attempt history is read by task id; an unknown or non-App task is a 404 in the usual error shape, and the
@@ -238,7 +280,7 @@ public sealed class AppAdminApiTests
             var expected = new[]
             {
                 ("/nodes", "get"), ("/nodes", "post"), ("/nodes/{nodeId}/token", "post"), ("/nodes/{nodeId}/disable", "post"),
-                ("/nodes/{nodeId}/resume", "post"), ("/bindings", "get"), ("/bindings/{bindingId}/disable", "post"),
+                ("/nodes/{nodeId}/resume", "post"), ("/nodes/{nodeId}/max-devices", "put"), ("/bindings", "get"), ("/bindings/{bindingId}/disable", "post"),
                 ("/bindings/{bindingId}/resume", "post"), ("/bindings/{bindingId}/limits", "put"), ("/platforms", "get"),
                 ("/platforms/{platformCode}/pause", "post"), ("/platforms/{platformCode}/resume", "post"),
                 ("/platforms/{platformCode}/limits", "put"), ("/platforms/{platformCode}/entry/restore", "post"), ("/capacity", "get"),
@@ -267,6 +309,9 @@ public sealed class AppAdminApiTests
                 ("AppPlatformLimitsRequest", "dailyCap"), ("AppPromptExclusionRequest", "reason"), ("RegisterAppNodeRequest", "nodeId"),
                 ("AppTaskAttemptsView", "outcome"), ("AppTaskAttemptsView", "attempts"), ("AppTaskAttemptView", "sendState"),
                 ("AppTaskAttemptView", "accepted"), ("AppAlertsView", "preSendFailures"), ("AppPreSendFailureAlert", "lastFailureCode"),
+                ("AppNodeView", "maxDevices"), ("AppNodeMaxDevicesRequest", "maxDevices"), ("AppBindingAdminView", "approvalPending"),
+                ("AppBindingAdminView", "approvedAt"), ("AppAlertsView", "pendingApprovalBindings"),
+                ("AppPendingApprovalBindingAlert", "registeredAt"), ("AppPendingApprovalBindingAlert", "accountLabel"),
             })
             {
                 var description = schemas.GetProperty(schema).GetProperty("properties").GetProperty(property);
@@ -349,7 +394,7 @@ public sealed class AppAdminApiTests
         private void Seed()
         {
             var now = DateTimeOffset.UtcNow;
-            var node = new AppNodeView("node-a", AppNodeStatus.Active, now, now, false, "rev", 1, 1, now, now);
+            var node = new AppNodeView("node-a", AppNodeStatus.Active, now, now, false, "rev", 1, 1, now, now) { MaxDevices = 6 };
             var binding = new AppBindingAdminView(Guid.NewGuid(), "node-a", "AI_Apps_4KB", "doubao", "doubao-a", "com.larus.nova", "1", "1", "15",
                 AppBindingStatus.Active, null, null, null, null, false, now, now, now, 300, null, now, now);
             var platforms = AppChannelDefinition.Platforms.Select(p => new AppPlatformStateView(p.Code, p.DisplayName, 30, null, null, false, null,
@@ -364,6 +409,7 @@ public sealed class AppAdminApiTests
             Pool.Handlers[nameof(IAppCollectorPoolStore.ResumePlatformAsync)] = _ => Task.FromResult(true);
             Admin.Handlers[nameof(IAppCollectorAdminStore.ListNodesAsync)] = _ => Task.FromResult<IReadOnlyList<AppNodeView>>([node]);
             Admin.Handlers[nameof(IAppCollectorAdminStore.GetNodeAsync)] = _ => Task.FromResult(node);
+            Admin.Handlers[nameof(IAppCollectorAdminStore.SetNodeMaxDevicesAsync)] = _ => Task.FromResult(true);
             Admin.Handlers[nameof(IAppCollectorAdminStore.ListBindingsAsync)] = _ => Task.FromResult<IReadOnlyList<AppBindingAdminView>>([binding]);
             Admin.Handlers[nameof(IAppCollectorAdminStore.GetBindingAsync)] = _ => Task.FromResult(binding);
             Admin.Handlers[nameof(IAppCollectorAdminStore.DisableBindingAsync)] = _ => Task.FromResult(true);

@@ -60,66 +60,30 @@ public sealed partial class AppCollectionStore(MySqlDatabase database) : IAppCol
         await AppChannelSchema.RequireAsync(c, t, ct);
 
         var selection = slot.Selection;
-        if (selection.PromptIds.Count > MonitoringMatrix.MaxPrompts) return Skip(AppMonitoringPlan.TooLargeCode);
-        // Only App targets of known platforms; anything else in a frozen App snapshot is ignored, never sent to an API run.
-        var targets = selection.Targets
-            .Where(target => target is not null && MonitoringProviders.IsApp(target.Provider) && AppChannelDefinition.SupportsEngine(target.Engine))
-            .Select(target => AppChannelDefinition.TryGetPlatform(target.Engine)!.Code).Distinct(StringComparer.Ordinal)
-            .Select(engine => AutomaticMonitoringSelection.StoredTarget(AppChannelDefinition.Provider, engine,
-                AppChannelDefinition.Locale, AppChannelDefinition.Country, null))
-            .ToArray();
-        if (selection.PromptIds.Count == 0 || targets.Length == 0) return Skip(AppMonitoringPlan.SelectionEmptyCode);
-
-        var brand = await QuerySingleAsync(c, t, """
-            SELECT subject_config_version, target_config_version FROM site_brand_settings
-            WHERE tenant_id = UUID_TO_BIN(@tenant) AND site_id = UUID_TO_BIN(@site) FOR SHARE;
-            """, ct, ("@tenant", tenant), ("@site", site));
-        if (brand is null) return new(null, "RESOURCE_NOT_FOUND", "品牌配置不存在，App 时隙未提交。");
-
-        // Current rows of the frozen prompts, in creation order (the order fair_rank follows). Same snapshot columns as an API check.
-        var parameters = new List<object> { ("@tenant", tenant), ("@site", site) };
-        parameters.AddRange(selection.PromptIds.Select((id, i) => (object)($"@p{i}", id.ToString())));
-        var rows = await QueryRowsAsync(c, t, $"""
-            SELECT BIN_TO_UUID(p.id), p.content, BIN_TO_UUID(p.current_version_id),
-                   COALESCE(v.branded_status, 'unbranded'), COALESCE(v.branded_source, 'system'),
-                   COALESCE((SELECT JSON_ARRAYAGG(pvt.tag_name_snapshot) FROM prompt_version_tags pvt
-                             WHERE pvt.prompt_version_id = p.current_version_id), JSON_ARRAY())
-            FROM prompts p JOIN sites s ON s.id = p.site_id
-            LEFT JOIN prompt_versions v ON v.id = p.current_version_id
-            WHERE s.tenant_id = UUID_TO_BIN(@tenant) AND s.id = UUID_TO_BIN(@site)
-              AND p.archived_at IS NULL AND p.enabled = TRUE
-              AND p.id IN ({string.Join(',', selection.PromptIds.Select((_, i) => $"UUID_TO_BIN(@p{i})"))})
-            ORDER BY p.created_at, p.id
-            FOR SHARE;
-            """, ct, parameters.ToArray());
-        var prompts = rows.ToDictionary(row => Guid.Parse(row[0]));
-        var creationOrder = rows.Select(row => Guid.Parse(row[0])).ToArray();
-
-        // Prompt check (design 5): the operator exclusion wins, then the rule on the prompt's current text.
-        var operatorExcluded = await ActiveExclusionsAsync(c, t, slot.TenantId, slot.SiteId, ct);
-        var excluded = new List<(Guid PromptId, string Reason)>();
-        foreach (var id in selection.PromptIds)
-        {
-            if (!prompts.TryGetValue(id, out var row)) { excluded.Add((id, PromptUnavailableReason)); continue; }
-            var eligibility = AppPromptRules.Eligibility(row[1], operatorExcluded.Contains(id));
-            if (!eligibility.Eligible) excluded.Add((id, eligibility.ReasonCode!));
-        }
-        var rejected = excluded.Select(item => item.PromptId).ToHashSet();
-        var pairs = MonitoringMatrix.Expand(selection.PromptIds, targets, selection.PromptTargets)
-            .Where(pair => !rejected.Contains(pair.PromptId)).ToArray();
-        if (pairs.Length == 0)
-            return new(null, AppMonitoringPlan.SelectionEmptyCode, AppMonitoringPlan.SkipMessage(AppMonitoringPlan.SelectionEmptyCode)
-                + (excluded.Count == 0 ? "" : $"其中 {excluded.Count} 条提问不进入 App 渠道（{ReasonSummary(excluded)}）。"));
-
-        var entries = await EnabledEntriesAsync(c, t, ct);
-        var unavailable = pairs.Select(pair => targets[pair.TargetIndex].Engine).Distinct(StringComparer.Ordinal)
-            .Where(engine => !entries.ContainsKey(engine)).ToArray();
-        pairs = pairs.Where(pair => entries.ContainsKey(targets[pair.TargetIndex].Engine)).ToArray();
-        if (pairs.Length == 0) return Skip(AppMonitoringPlan.PlatformUnavailableCode);
+        var zone = CollectionScheduleCalendar.ParseTimeZone(slot.TimeZone);
+        var plan = await PlanPairsAsync(c, t, slot.TenantId, slot.SiteId, selection, AppCycleRules.NominalUtc(slot.LocalSlotKey, zone), ct);
+        if (plan.Skip is { } skipped) return skipped;
+        var (targets, pairs, prompts, creationOrder, excluded, unavailable, entries, brand) =
+            (plan.Targets, plan.Pairs, plan.Prompts, plan.CreationOrder, plan.Excluded, plan.Unavailable, plan.Entries, plan.Brand!);
 
         var runId = Guid.NewGuid();
         var now = DateTime.UtcNow;
-        var deadline = AppCycleRules.DeadlineUtc(slot.LocalSlotKey, CollectionScheduleCalendar.ParseTimeZone(slot.TimeZone));
+        // A regular slot's cycle ends at the next regular slot (slot + 7 days). An instant slot (design: 11-27-app-first-cycle-now)
+        // covers each platform up to that platform's next regular slot, so the weekly rhythm of its anchor continues unchanged.
+        var instant = AppCycleRules.IsInstantSlotKey(slot.LocalSlotKey);
+        var anchors = instant ? await AnchorsAsync(c, t, slot.TenantId, slot.SiteId, ct) : null;
+        var slotDate = AutomaticMonitoringSelection.SlotLocalDate(slot.LocalSlotKey);
+        DateTimeOffset DeadlineOf(string engine) => instant
+            ? AppCycleRules.InstantDeadlineUtc(slotDate, anchors!.GetValueOrDefault(engine), zone)
+            : AppCycleRules.DeadlineUtc(slot.LocalSlotKey, zone);
+        // An instant slot expanded late (the Worker was down) never queues tasks that are already past their deadline: the
+        // platform's regular slot, due by then, collects those pairs.
+        if (instant)
+        {
+            pairs = pairs.Where(pair => DeadlineOf(targets[pair.TargetIndex].Engine) > now).ToArray();
+            if (pairs.Length == 0) return Skip(AutomaticMonitoringSelection.AlreadyCollectedCode);
+        }
+        var deadline = pairs.Select(pair => DeadlineOf(targets[pair.TargetIndex].Engine)).Max();
         var configVersion = int.Parse(brand[0], CultureInfo.InvariantCulture);
         var ranks = AppCycleRules.FairRanks(creationOrder, pairs.Select(pair => (pair.PromptId, targets[pair.TargetIndex].Engine)).ToArray());
         var audit = JsonSerializer.Serialize(new
@@ -133,6 +97,7 @@ public sealed partial class AppCollectionStore(MySqlDatabase database) : IAppCol
             {
                 SlotKey = slot.LocalSlotKey,
                 DeadlineAt = deadline,
+                Instant = instant,
                 PromptRuleVersion = AppPromptRules.RuleVersion,
                 Checks = pairs.Length,
                 ExcludedPromptCount = excluded.Count,
@@ -199,7 +164,7 @@ public sealed partial class AppCollectionStore(MySqlDatabase database) : IAppCol
                 """, ct, ("@id", Guid.NewGuid().ToString()), ("@tenant", tenant), ("@run", runId.ToString()), ("@check", checkId.ToString()),
                 ("@entry", entries[engine].ToString()), ("@platform", engine), ("@language", AppChannelDefinition.Locale),
                 ("@channel", AppChannelDefinition.CollectorChannel), ("@question", prompt[1]), ("@now", now),
-                ("@deadline", deadline.UtcDateTime), ("@rank", ranks[i]), ("@rule", AppPromptRules.RuleVersion));
+                ("@deadline", DeadlineOf(engine).UtcDateTime), ("@rank", ranks[i]), ("@rule", AppPromptRules.RuleVersion));
         }
         return new(runId, null, null);
     }

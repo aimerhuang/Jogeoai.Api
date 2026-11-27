@@ -11,6 +11,9 @@ namespace Jogeoai.Tests;
 
 public sealed class CollectionScheduleTests
 {
+    // Unreachable on purpose: a test that gets as far as opening a connection fails fast instead of touching a database.
+    private static readonly MySqlDatabase Offline = new("Server=127.0.0.1;Port=1;Database=none;User ID=none;Password=none;Connection Timeout=1");
+
     [Fact]
     public async Task SlotIsSkippedForThePoolOnlyWhenEveryEnabledKeyIsOutOfCreditsOrInvalid()
     {
@@ -195,7 +198,7 @@ public sealed class CollectionScheduleTests
     }
 
     [Fact]
-    public void MonitoringSlotPassesPromptTargetsWhileCustomPlansStayCartesian()
+    public void EverySlotIsChargedAndOnlyMonitoringSlotsPassPromptTargets()
     {
         var tenant = Guid.NewGuid(); var site = Guid.NewGuid(); var schedule = Guid.NewGuid();
         var chatgpt = new CloroVisibilityTarget("cloro", "chatgpt", "zh-CN", "US", "{}");
@@ -216,9 +219,133 @@ public sealed class CollectionScheduleTests
         Assert.Null(legacy.PromptTargetKeys);
         Assert.Equal(monitoring with { PromptTargetKeys = null }, legacy);
 
+        // RD2: a custom plan's slot run reserves credits like any other; charging never depends on the plan name.
+        // It has no per-prompt scope, so it stays a full cartesian product even if its snapshot carries one.
         var custom = CollectionScheduleStore.SlotRunCommand(tenant, site, schedule, "weekly report", "20261104T0900", scoped);
-        Assert.False(custom.ChargeMonitoringCredits);
+        Assert.True(custom.ChargeMonitoringCredits);
         Assert.Null(custom.PromptTargetKeys);
+        Assert.True(custom.RequireEnabledTargets);
+        Assert.Equal($"schedule:{schedule:N}", custom.RequestedBy);
+        Assert.Equal(4, MonitoringMatrix.Expand(custom.PromptIds, custom.Targets, custom.PromptTargetKeys).Count);
+        // A monitoring plan that was renamed before the rename lock existed is such a custom plan: still charged.
+        var night = CollectionScheduleStore.SlotRunCommand(tenant, site, schedule, PromptMonitoringIdentity.NightScheduleName, "20261104T0005", scoped);
+        Assert.True(night.ChargeMonitoringCredits);
+        Assert.Same(scoped.PromptTargets, night.PromptTargetKeys);
+    }
+
+    // RD3: the public create path refuses the reserved monitoring names before it opens a connection (the offline database
+    // would fail otherwise); the App plan name keeps its own 400. Spellings the name column's case- and accent-insensitive
+    // collation treats as equal are reserved too.
+    [Theory]
+    [InlineData(PromptMonitoringIdentity.ScheduleName, "SCHEDULE_NAME_RESERVED", 409)]
+    [InlineData(PromptMonitoringIdentity.NightScheduleName, "SCHEDULE_NAME_RESERVED", 409)]
+    [InlineData("  " + PromptMonitoringIdentity.ScheduleName + " ", "SCHEDULE_NAME_RESERVED", 409)]
+    [InlineData("JOGEOAI:Auto-Prompt-Monitoring:V1", "SCHEDULE_NAME_RESERVED", 409)]
+    [InlineData("jogeoai:auto-prompt-monitoring:app:V1", "SCHEDULE_NAME_RESERVED", 409)]
+    [InlineData(PromptMonitoringIdentity.AppScheduleName, "INVALID_SCHEDULE_NAME", 400)]
+    public async Task PublicCreateRefusesReservedPlanNamesBeforeTouchingTheDatabase(string name, string code, int status)
+    {
+        var selection = new CollectionScheduleSelection([Guid.NewGuid()], [new CloroVisibilityTarget("cloro", "chatgpt", "en-US", "US")]);
+        var refused = await Assert.ThrowsAsync<CollectorStoreException>(() => new CollectionScheduleStore(Offline).CreateAsync(
+            new CreateCollectionScheduleCommand(Guid.NewGuid(), Guid.NewGuid(), name, "daily", null, "09:00", "UTC", selection)));
+        Assert.Equal((code, status), (refused.Code, refused.StatusCode));
+    }
+
+    [Fact]
+    public async Task InternalCreateAcceptsOnlyTheMonitoringNamesAndIsNotStoppedByTheReservedNameCheck()
+    {
+        var selection = new CollectionScheduleSelection([Guid.NewGuid()], [new CloroVisibilityTarget("cloro", "chatgpt", "en-US", "US")]);
+        var store = new CollectionScheduleStore(Offline);
+        // Past validation and the name check: the first failure is the unreachable database, not a store refusal.
+        var reached = await Record.ExceptionAsync(() => store.CreateAutomaticPlanAsync(new CreateCollectionScheduleCommand(
+            Guid.NewGuid(), Guid.NewGuid(), PromptMonitoringIdentity.ScheduleName, "daily", null, PromptMonitoringIdentity.MainLocalTime, "UTC", selection, true)));
+        Assert.NotNull(reached);
+        Assert.IsNotType<CollectorStoreException>(reached);
+        Assert.IsNotType<ArgumentException>(reached);
+        // Any other name is a programming error; it can never become a way around the public path's checks.
+        foreach (var name in new[] { "weekly report", PromptMonitoringIdentity.AppScheduleName, "JOGEOAI:AUTO-PROMPT-MONITORING:V1" })
+            await Assert.ThrowsAsync<ArgumentException>(() => store.CreateAutomaticPlanAsync(
+                new CreateCollectionScheduleCommand(Guid.NewGuid(), Guid.NewGuid(), name, "daily", null, "09:00", "UTC", selection)));
+    }
+
+    [Theory]
+    [InlineData(PromptMonitoringIdentity.ScheduleName, true)]
+    [InlineData(PromptMonitoringIdentity.NightScheduleName, true)]
+    [InlineData(PromptMonitoringIdentity.AppScheduleName, true)]
+    [InlineData("JOGEOAI:AUTO-PROMPT-MONITORING:NIGHT:V1", true)]
+    [InlineData("ｊｏｇｅｏａｉ：auto-prompt-monitoring：v1", true)]
+    [InlineData("ｊｏｇｅｏａｉ:auto-prompt-monitoring:v１", true)]
+    [InlineData("jogéoai:auto-prompt-monitoring:v1", true)]
+    [InlineData("jogeoai:auto-prompt-monitoring:v1\u200b", true)]
+    [InlineData("jogeoai:auto-prompt-monitoring:v2", false)]
+    [InlineData("jogeoai:auto-prompt-monitoring", false)]
+    [InlineData("weekly report", false)]
+    [InlineData("", false)]
+    [InlineData(null, false)]
+    public void ReservedPlanNamesIncludeTheSpellingsTheNameCollationTreatsAsEqual(string? name, bool reserved)
+        => Assert.Equal(reserved, PromptMonitoringIdentity.IsReservedScheduleName(name));
+
+    // IsReservedScheduleName only approximates the name column's collation (a letter without a Unicode decomposition that
+    // the collation weighs like its base letter passes it). Both public write paths therefore let MySQL compare the row
+    // they just wrote, in the column's own collation, and leave without committing when it is a reserved name. That needs a
+    // database to exercise (ManualRunChargingSqlTests), so the order write → re-check → commit is pinned by source text.
+    [Theory]
+    [InlineData("private async Task<CollectionScheduleView> CreateCoreAsync(", "public async Task<CursorPage<CollectionScheduleView>> ListAsync(",
+        "INSERT INTO collection_schedules", "if (!automatic && await HasReservedNameAsync(")]
+    [InlineData("public async Task<CollectionScheduleView?> UpdateAsync(", "public async Task<int> MaterializeDueSlotsAsync(",
+        "UPDATE collection_schedules SET name=@name", "if (renamed && await HasReservedNameAsync(")]
+    public void ReservedNameIsRecheckedByTheDatabaseAfterTheWriteAndBeforeTheCommit(string start, string end, string write, string check)
+    {
+        var directory = new DirectoryInfo(AppContext.BaseDirectory);
+        while (directory is not null && !File.Exists(Path.Combine(directory.FullName, "Jogeoai.slnx"))) directory = directory.Parent;
+        var source = File.ReadAllText(Path.Combine(directory!.FullName, "src", "Jogeoai.Infrastructure", "CollectionScheduleStore.cs"));
+        var from = source.IndexOf(start, StringComparison.Ordinal);
+        var to = source.IndexOf(end, StringComparison.Ordinal);
+        Assert.True(from >= 0 && to > from);
+        var body = source[from..to];
+        var written = body.IndexOf(write, StringComparison.Ordinal);
+        var checkedAt = body.IndexOf(check, StringComparison.Ordinal);
+        var committed = body.LastIndexOf("await tx.CommitAsync(cancellationToken);", StringComparison.Ordinal);
+        Assert.True(written >= 0 && checkedAt > written && committed > checkedAt, $"write {written}, check {checkedAt}, commit {committed}");
+        Assert.StartsWith("throw NameReserved();", body[(checkedAt + check.Length)..].Split('\n')[1].Trim(), StringComparison.Ordinal);
+        // The comparison is made on the stored column, not on a literal: a column's collation outranks a parameter's.
+        var helper = source[source.IndexOf("private static async Task<bool> HasReservedNameAsync(", StringComparison.Ordinal)..];
+        helper = helper[..helper.IndexOf("private static async Task<int> CountCustomSchedulesAsync(", StringComparison.Ordinal)];
+        Assert.Contains("FROM collection_schedules", helper, StringComparison.Ordinal);
+        Assert.Contains("AND name IN (@main, @night, @app);", helper, StringComparison.Ordinal);
+        Assert.DoesNotContain("COLLATE", helper, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void CustomPlanCapDefaultsTo20AndIsBoundFromTheCollectionSchedulesSection()
+    {
+        Assert.Equal(20, new CollectionScheduleOptions().MaxCustomPerSite);
+        Assert.Equal(20, CollectionScheduleOptions.DefaultMaxCustomPerSite);
+        Assert.Equal("Collection:Schedules", CollectionScheduleOptions.SectionName);
+        var directory = new DirectoryInfo(AppContext.BaseDirectory);
+        while (directory is not null && !File.Exists(Path.Combine(directory.FullName, "Jogeoai.slnx"))) directory = directory.Parent;
+        var program = File.ReadAllText(Path.Combine(directory!.FullName, "src", "Jogeoai.Api", "Program.cs"));
+        Assert.Contains("builder.Services.Configure<CollectionScheduleOptions>(builder.Configuration.GetSection(CollectionScheduleOptions.SectionName));",
+            program, StringComparison.Ordinal);
+    }
+
+    // The collection-schedules controller is the only public caller of the store and must stay on the checked entry point.
+    [Fact]
+    public void PublicControllerNeverCallsTheInternalCreateEntryPoint()
+    {
+        var directory = new DirectoryInfo(AppContext.BaseDirectory);
+        while (directory is not null && !File.Exists(Path.Combine(directory.FullName, "Jogeoai.slnx"))) directory = directory.Parent;
+        var controllers = Directory.GetFiles(Path.Combine(directory!.FullName, "src", "Jogeoai.Api"), "*.cs", SearchOption.AllDirectories)
+            .Where(file => !file.Contains($"{Path.DirectorySeparatorChar}obj{Path.DirectorySeparatorChar}", StringComparison.Ordinal)
+                && !file.Contains($"{Path.DirectorySeparatorChar}bin{Path.DirectorySeparatorChar}", StringComparison.Ordinal)).ToArray();
+        Assert.NotEmpty(controllers);
+        Assert.All(controllers, file => Assert.DoesNotContain(nameof(ICollectionScheduleStore.CreateAutomaticPlanAsync), File.ReadAllText(file), StringComparison.Ordinal));
+        var schedules = File.ReadAllText(Path.Combine(directory.FullName, "src", "Jogeoai.Api", "Controllers", "CollectionSchedulesController.cs"));
+        Assert.Contains("schedules.CreateAsync(new CreateCollectionScheduleCommand(", schedules, StringComparison.Ordinal);
+        // The only caller is the daily-monitoring service.
+        var infrastructure = Directory.GetFiles(Path.Combine(directory.FullName, "src", "Jogeoai.Infrastructure"), "*.cs", SearchOption.TopDirectoryOnly)
+            .Where(file => File.ReadAllText(file).Contains(".CreateAutomaticPlanAsync(", StringComparison.Ordinal)).Select(Path.GetFileName).ToArray();
+        Assert.Equal(new[] { "PromptMonitoringService.cs" }, infrastructure);
     }
 
     [Fact]
@@ -285,6 +412,7 @@ public sealed class CollectionScheduleTests
             finally { gate.Release(); }
         }
         public Task<CollectionScheduleView> CreateAsync(CreateCollectionScheduleCommand command, CancellationToken ct = default) => throw new NotSupportedException();
+        public Task<CollectionScheduleView> CreateAutomaticPlanAsync(CreateCollectionScheduleCommand command, CancellationToken ct = default) => throw new NotSupportedException();
         public Task<CursorPage<CollectionScheduleView>> ListAsync(Guid tenantId, Guid siteId, string? cursor, int limit, CancellationToken ct = default) => throw new NotSupportedException();
         public Task<CollectionScheduleView?> UpdateAsync(UpdateCollectionScheduleCommand command, CancellationToken ct = default) => throw new NotSupportedException();
     }

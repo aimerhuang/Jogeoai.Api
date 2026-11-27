@@ -14,7 +14,7 @@ Trellis 任务：`10-29-domestic-52pay-api-provider`（千问 / 智谱清言 / K
 - 四个 Provider 都是 `captureMode=api`、`evidenceClass=api_response`，固定 CN / zh-CN。parser 版本：千问 / GLM 为 `packy-responses-v1`，Kimi 为 `packy-anthropic-v1`。用量类型为 `packy_{qwen|glm|kimi|yuanbao}_call`。
 - **为什么拆成三个 Provider**：PackyAPI 的 key 按分组发放、不能互用，三个引擎的协议也不同。每个 Provider 一行设置、一把 key，所以目录、手动 Run、每日计划这些共用的「是否已配置」判断都不用改。
 - 执行：`PackyQwenTaskWorker`、`PackyGlmTaskWorker`、`PackyKimiTaskWorker`、`PackyYuanbaoTaskWorker` 共用配置节 `Packy:Worker`，默认批量 2、并发 2、租约 600 秒，并发上限每个 Provider 各算一份。每个任务同步调用一次，结果通过 `CompleteSynchronousTaskAsync` 在一个事务里写入。
-- 积分与 Cloro、DeepSeek 同价：每日监控按「问题 × 目标 × 样本」预留并结算 10 积分；手动 Run 不预留积分。
+- 积分与 Cloro、DeepSeek 同价：每日监控按「问题 × 目标 × 样本」预留并结算 10 积分。手动 Run 自 2026-11-27 起同价预留，余额不足返回 402 `CREDIT_INSUFFICIENT`（Trellis `11-27-sec-manual-run-charging`，代码已实现，本机 API / Worker 尚未用该构建重启；见[品牌监控配置说明](brand-monitoring-config.md) §4、§9）；在此之前不预留，§5、§6 记录的手动 Run 都属于这一时期。
 
 ## 2. 配置
 

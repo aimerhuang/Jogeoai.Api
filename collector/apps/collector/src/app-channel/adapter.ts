@@ -10,6 +10,7 @@ import {
   type AppContract,
   type ContractSource,
   type ContractStep,
+  type SourceLinks,
   type SourcePath,
 } from "./contract.ts";
 import type { DeviceActual, DeviceInspector } from "./devices.ts";
@@ -24,11 +25,13 @@ import {
   fileEvidence,
   overallCitations,
   type AppRecord,
+  type CitationLink,
   type CitationList,
   type EvidenceIssue,
   type EvidenceStore,
   type FileEvidence,
   type LedgerEntry,
+  type LinkIssue,
 } from "./evidence.ts";
 import { AppChannelError, AppSetupError, type AppFailureCode } from "./failure.ts";
 import {
@@ -44,6 +47,7 @@ import {
   layoutSignature,
   mergeWindows,
 } from "./hierarchy.ts";
+import { restoreLink } from "./links.ts";
 import type { RateGate } from "./rate-gate.ts";
 import type { ActiveRecording, RecordingOutcome, ScreenRecorder } from "./recorder.ts";
 import { realSleep, timestampPair, type Sleep } from "./time.ts";
@@ -72,6 +76,10 @@ export interface AttemptRequest {
   // Aborts when the run has been asked to stop and the grace period is over: the attempt then
   // ends as a failure with its record.
   signal: AbortSignal;
+  // Aborts as soon as the run has been asked to stop, while the grace period still runs. Work
+  // that may be cut short without losing the sample (reading the links of its sources) ends
+  // then, so that a sent question is not lost to the end of the grace period.
+  stopping?: AbortSignal;
   // Called once the question is counted as sent (ledger line written), right before the tap.
   onSent: () => void;
   // Control-plane mode (`serve`): the answer ID chosen before the attempt, so a restart can find
@@ -157,6 +165,17 @@ const PANEL_BACK_WAIT_MS = 2_000;
 const VIA_ITEMS = 5;
 // How long the views under Android's clipboard preview may take to come back after a copy.
 const COPY_SETTLE_MS = 10_000;
+// Reading the link of every source (contract `links`). The time allowed for the links of one
+// answer when the contract does not say; how long a tapped title is given to open its page
+// (real device, Doubao 15.7.0: 0.55 to 0.65 s); how often the clipboard is read after a copy
+// before it counts as unchanged.
+const LINK_BUDGET_SECONDS = 180;
+const PAGE_OPEN_MS = 5_000;
+const LINK_CLIPBOARD_READS = 3;
+// Back presses that may bring the App to the front again after a source or its share control
+// took the screen to another package (design of task 11-24, §11.1).
+const FOREIGN_BACK_PRESSES = 2;
+const isWebLink = (text: string) => /^https?:\/\/\S+$/u.test(text);
 
 // `cause` names the check that failed: a fixed word for the logs, never text from a screen.
 const changed = (cause: string) => new AppChannelError("app_contract_changed", undefined, cause);
@@ -177,12 +196,56 @@ const isHierarchyProblem = (error: unknown) =>
 type Citation = AppRecord["citations"][number];
 const sameCitation = (a: Citation, b: Citation) =>
   a.title === b.title && a.site === b.site && a.url === b.url;
+// Why the links of an answer's sources were not all read: the time was up, a stop was
+// requested, a page or the panel behind it did not come back, or the list stopped moving before
+// every source had come on screen.
+// `driver_error`: a driver command failed during the read; what was read by then is kept.
+type LinkStop =
+  | "time_budget"
+  | "stop_requested"
+  | "page_not_closed"
+  | "list_not_moving"
+  | "driver_error";
+interface LinkRead {
+  elapsedMs: number;
+  stoppedBy?: LinkStop;
+  // With `driver_error`: the failed command and its protocol error code, nothing else.
+  driver?: ReturnType<typeof driverDetail>;
+  // The read did not end on the source panel (a page that stayed, or a panel that did not come
+  // back): what is on screen is left to the caller's clean-up, and nothing is pressed for it.
+  leftOpen: boolean;
+  // Diagnostics (design of task 11-24, §12.1): one entry per screen of the list, the last
+  // `MAX_LINK_SCREENS` of them, and how many earlier ones were dropped.
+  screens: LinkScreen[];
+  screensDropped: number;
+  // With `list_not_moving`: which of its three conditions held (diagnostics, §12.1).
+  listStop?: ListStop;
+}
+type ListStop = "no_titles" | "unmoved" | "screen_limit";
+// What one screen of the list gave while its links were read: counts and positions only, never a
+// title, a link or other text. `all`: title views seen; `whole`: those the list does not cut;
+// `at`: the position in the list (from 1) of the first whole one, null where the screen does not
+// fit the list read before; `next`: the first source not yet handled when the screen was taken
+// (from 1); `opened`: sources opened from it; `waited`: the wait for the clipboard preview was
+// made on it.
+interface LinkScreen {
+  all: number;
+  whole: number;
+  at: number | null;
+  next: number;
+  opened: number;
+  waited: boolean;
+}
+// Screens kept for the log line; the stop is at the end, so the earliest ones are dropped.
+const MAX_LINK_SCREENS = 30;
 // What the read of one source path gave. `issue` is the fixed cause word of a read that failed.
+// `links` only where the path reads the link of every source.
 interface Sources {
   citations: Citation[];
   searchQueries: string[];
   status: CitationList["status"];
   issue?: string;
+  links?: LinkRead;
 }
 
 // The answer text views of one hierarchy export.
@@ -248,6 +311,11 @@ function citationItems(root: UiNode, contract: SourcePath): Citation[] {
       ];
     });
   }
+  return titleItems(root, contract).map(({ item }) => item);
+}
+// The title views of one export of the open panel with the source each of them shows, in screen
+// order (a source path with `itemTitle`).
+function titleItems(root: UiNode, contract: SourcePath): { node: UiNode; item: Citation }[] {
   const titles = findNodes(root, contract.itemTitle!).filter((node) => node.text.trim() !== "");
   const inItem = (title: UiNode, selector: Selector | undefined): string | null => {
     if (selector === undefined) return null;
@@ -264,12 +332,51 @@ function citationItems(root: UiNode, contract: SourcePath): Citation[] {
   return titles.map((title) => {
     const url = inItem(title, contract.itemUrl);
     return {
-      title: title.text.trim(),
-      site: inItem(title, contract.itemSite),
-      // Only what is shown as a link; nothing is completed.
-      url: url !== null && /^https?:\/\/\S+$/u.test(url) ? url : null,
+      node: title,
+      item: {
+        title: title.text.trim(),
+        site: inItem(title, contract.itemSite),
+        // Only what is shown as a link; nothing is completed.
+        url: url !== null && /^https?:\/\/\S+$/u.test(url) ? url : null,
+      },
     };
   });
+}
+// Of the title views of one export, those that the list does not cut. A view that an edge of the
+// list cuts is reported with the part that shows, so it is shorter than the others where it
+// touches that edge; a tap on it can land on the edge (real device, Doubao 15.7.0: a tap on a
+// row at the bottom of the half-open panel opened nothing). Its source is opened from a later
+// screen. The edge is that of the nearest view holding every title; without one, nothing is
+// left out.
+function uncutTitles<T extends { node: UiNode }>(titles: readonly T[]): T[] {
+  const nodes = titles.map((title) => title.node);
+  let list: UiNode | null = nodes[0]?.parent ?? null;
+  while (list && !nodes.every((node) => isInside(node, list!))) list = list.parent;
+  const edge = list?.bounds;
+  const height = (node: UiNode) => (node.bounds ? node.bounds.bottom - node.bounds.top : 0);
+  if (!edge || titles.length < 2) return [...titles];
+  const tallest = Math.max(...nodes.map(height));
+  return titles.filter(
+    ({ node }) =>
+      !node.bounds ||
+      height(node) >= tallest ||
+      (node.bounds.top > edge.top && node.bounds.bottom < edge.bottom),
+  );
+}
+// Where the sources of one screen sit in the list read before: the position of the first, at
+// or after `from` where the screen is found there, else the first position it is found at.
+function alignWindow(
+  items: readonly Citation[],
+  window: readonly Citation[],
+  from: number,
+): number | undefined {
+  if (window.length === 0) return undefined;
+  const fits = (offset: number) =>
+    window.every((item, index) => sameCitation(item, items[offset + index]!));
+  for (const start of from > 0 ? [from, 0] : [0])
+    for (let offset = start; offset + window.length <= items.length; offset += 1)
+      if (fits(offset)) return offset;
+  return undefined;
 }
 function searchQueries(root: UiNode, contract: SourcePath): string[] {
   const rule = contract.searchQueries;
@@ -313,6 +420,18 @@ class Screen {
   // lands on the conversation and leaves it, with nothing left on screen that a source read
   // could still see. The caller therefore asks for the end of the answer afterwards.
   sourceStepsOpened = false;
+  // Reading links ended away from a source panel (a source's page that stayed, or a panel that
+  // did not come back) and was left by the clean-up: as after a screen in between, the caller
+  // asks for the end of the answer afterwards.
+  linkPageLeftOpen = false;
+  // What the clipboard held after the last link was copied, where links were read: a copy of the
+  // answer that gives this text did nothing.
+  lastLink: string | undefined;
+  // The attempt's record directory, once it exists: where the screen at a stop of the link read
+  // is kept (design of task 11-24, §12.2). Set by the attempt, not by the contract.
+  recordDirectory: string | undefined;
+  // That screen and hierarchy, taken at the first such stop of the attempt.
+  linkStop: AppRecord["linkStop"];
 
   constructor(
     readonly driver: DeviceDriver,
@@ -321,6 +440,8 @@ class Screen {
     private readonly now: () => Date,
     private readonly sleep: Sleep,
     private readonly signal?: AbortSignal,
+    // A stop was requested; the grace period still runs (`AttemptRequest.stopping`).
+    private readonly stopping?: AbortSignal,
   ) {}
 
   // A wait between two looks at the screen. An aborted run ends the attempt as a failure.
@@ -640,16 +761,527 @@ class Screen {
     if (!(await this.waitFor(contract.panel, this.timings.stepTimeoutMs)))
       throw changed("source_panel_not_opened");
     const list = await this.readOpenList(contract, entryText);
-    if ("back" in contract.close) await this.backOutOf(contract.panel);
+    // Only a list that was read whole, and checked against the number the App states, is worth
+    // the minutes its links take; a list that is not saved has no use for them.
+    const linked =
+      contract.links && list.items.length > 0
+        ? await this.readLinks(contract, contract.links, list.items)
+        : undefined;
+    const citations = linked?.items ?? list.items;
+    // An empty list got this far only because the App itself states that there are no sources.
+    const read: Sources = {
+      citations,
+      searchQueries: list.queries,
+      status: citations.length > 0 ? "read" : "absent",
+      ...(linked ? { links: linked.read } : {}),
+    };
+    // Not on the panel: the back key is not pressed for it here, where nothing says what it
+    // would land on. The caller's clean-up looks first.
+    if (linked?.read.leftOpen) return read;
+    // Pages were opened and left for minutes since the panel was last looked at for a crash or
+    // blocker (a rate-limit notice can show over the panel): the panel is not closed under one,
+    // and the back key is not pressed on one. Without links the panel was just read; as before.
+    if (linked) await this.assertHealthy();
+    if ("back" in contract.close) await this.backOutOf(contract.panel, linked !== undefined);
     else await this.driver.tap(await this.require(contract.close));
     if (!(await this.waitGone(contract.panel, this.timings.stepTimeoutMs)))
       throw changed("source_panel_not_closed");
-    // An empty list got this far only because the App itself states that there are no sources.
-    return {
-      citations: list.items,
-      searchQueries: list.queries,
-      status: list.items.length > 0 ? "read" : "absent",
+    return read;
+  }
+  // The link of every source of an open list that was read whole (contract `links`; design of
+  // task 11-24, §3). Each title is tapped, the page it opens is shared with "copy link", the
+  // clipboard is read through the driver and the page is left for the panel again (real device,
+  // Doubao 15.7.0). The clipboard is never read by bringing another App to the front: leaving
+  // the App closed its page and the panel behind it.
+  //
+  // A source whose link is not got keeps its title and the URL the panel showed, with the cause
+  // in `link`; nothing here fails the list. Only a crash or a blocker throws (its own class),
+  // and a failed driver command, which the caller treats as a failed source read. Every tap is
+  // preceded by a look for a crash or blocker, and every back press on a page by another
+  // (`backOutOf` with `lookFirst`): the key is never pressed on a login, verification,
+  // rate-limit or emulator notice.
+  private async readLinks(
+    contract: SourcePath,
+    links: SourceLinks,
+    items: readonly Citation[],
+  ): Promise<{ items: Citation[]; read: LinkRead }> {
+    const started = this.now().getTime();
+    const deadline = started + (links.budgetSeconds ?? LINK_BUDGET_SECONDS) * 1_000;
+    const result = items.map((item) => ({ ...item }));
+    const outcome: (CitationLink | undefined)[] = items.map(() => undefined);
+    // Every source from `from` on that has no outcome yet gets `issue`.
+    const rest = (from: number, issue: LinkIssue) => {
+      for (let index = from; index < items.length; index += 1) outcome[index] ??= { issue };
     };
+    let stoppedBy: LinkStop | undefined;
+    let driver: ReturnType<typeof driverDetail> | undefined;
+    let leftOpen = false;
+    // The first source not yet handled.
+    let next = 0;
+    // Diagnostics only: nothing here decides what the read does.
+    const screens: LinkScreen[] = [];
+    let screensDropped = 0;
+    let listStop: ListStop | undefined;
+    const noteScreen = (screen: LinkScreen) => {
+      screens.push(screen);
+      if (screens.length > MAX_LINK_SCREENS) {
+        screens.shift();
+        screensDropped += 1;
+      }
+    };
+    const finish = async () => {
+      // Whatever ended the read, it leaves the panel on screen; where it does not, the caller's
+      // clean-up decides what to press.
+      if (!leftOpen && !(await this.waitFor(contract.panel, this.timings.stepTimeoutMs)))
+        leftOpen = true;
+      outcome.forEach((link, index) => {
+        if (link === undefined) return;
+        if ("copied" in link) {
+          const restored = restoreLink(link.copied, links);
+          result[index] = {
+            ...result[index]!,
+            url: restored.url,
+            link: { copied: link.copied, restored: restored.restored },
+          };
+        } else result[index] = { ...result[index]!, link };
+      });
+      return {
+        items: result,
+        read: {
+          elapsedMs: this.now().getTime() - started,
+          ...(stoppedBy ? { stoppedBy } : {}),
+          ...(driver ? { driver } : {}),
+          leftOpen,
+          screens,
+          screensDropped,
+          ...(listStop ? { listStop } : {}),
+        },
+      };
+    };
+    // Checked before every source is opened.
+    const halt = (): LinkStop | undefined =>
+      this.stopping?.aborted
+        ? "stop_requested"
+        : this.now().getTime() >= deadline
+          ? "time_budget"
+          : undefined;
+    const stop = (from: number, reason: LinkStop) => {
+      stoppedBy = reason;
+      rest(from, reason === "time_budget" ? "time_budget" : "not_attempted");
+    };
+    if (halt()) {
+      stop(0, halt()!);
+      return finish();
+    }
+    // A failed driver command ends the read of the links, not that of the list (PRD R3): the
+    // titles and the links read by then are kept, the source at hand and those after it are
+    // not attempted. Where the screen was left is unknown, so nothing more is pressed here: the
+    // caller's clean-up looks for a crash or blocker first, and fails the attempt where a page or
+    // the panel stays. A crash, a blocker and an aborted run keep their own class.
+    // `finish` is awaited inside: a failed driver command while it looks for the panel ends the
+    // read the same way.
+    try {
+      // What the clipboard holds before the first copy: a copy that leaves it so did nothing.
+      let previous = (await this.driver.readClipboard()).trim();
+      this.lastLink = previous;
+
+      // Back to the top of the list, which was read to its end. On a list that is already at its
+      // top, a swipe towards the start drags the panel itself, and a bottom sheet can close under
+      // it: the swipes end as soon as the first source is the first title on screen.
+      let view = await this.linkTitles(contract, false);
+      for (
+        let swipe = 0, unmoved = 0;
+        swipe < (contract.maxSwipes ?? 10) + SOURCE_LIST_END_SWIPES &&
+        unmoved < SOURCE_LIST_END_SWIPES &&
+        view.all.length > 0 &&
+        alignWindow(items, view.window, 0) !== 0;
+        swipe += 1
+      ) {
+        await this.driver.swipe("down", 1, view.bounds);
+        const later = await this.linkTitles(contract, false);
+        unmoved = later.signature === view.signature ? unmoved + 1 : 0;
+        view = later;
+      }
+
+      // Screen by screen, from the first source not yet handled.
+      let offset = 0;
+      let unmoved = 0;
+      let signature: string | undefined;
+      // The source first not handled when the last wait for the clipboard preview was made.
+      let waitedAt: number | undefined;
+      for (let screen = 0; next < items.length; screen += 1) {
+        view = await this.linkTitles(contract, true);
+        unmoved = view.signature === signature ? unmoved + 1 : 0;
+        signature = view.signature;
+        const at = alignWindow(items, view.window, offset);
+        const seen: LinkScreen = {
+          all: view.all.length,
+          whole: view.whole.length,
+          at: at === undefined ? null : at + 1,
+          next: next + 1,
+          opened: 0,
+          waited: false,
+        };
+        noteScreen(seen);
+        // A list that looks unmoved with sources left is not yet at its end: for a few seconds
+        // after a copy, Android's clipboard preview swallows a swipe, and can hide the last rows
+        // (real device, Doubao 15.7.0: right after "copy link" a swipe did nothing, the same
+        // swipe some 12 s later scrolled the list; design §13). So the preview is given its time
+        // once, until a source still to be handled shows or the time is up, and the list is
+        // swiped once more. The next look decides: a list that moved, or now shows other rows,
+        // goes on as usual; one that is the same counts as at its end. Once per stop: the wait
+        // and the swipe are made again only after a source was handled since. The time and a
+        // stop request are looked at before both.
+        if (unmoved >= SOURCE_LIST_END_SWIPES && view.all.length > 0 && waitedAt !== next) {
+          waitedAt = next;
+          const before = halt();
+          if (before) {
+            stop(next, before);
+            return await finish();
+          }
+          seen.waited = true;
+          await this.waitForTitle(contract, new Set(items.slice(next).map(({ title }) => title)));
+          const after = halt();
+          if (after) {
+            stop(next, after);
+            return await finish();
+          }
+          await this.driver.swipe("up", 1, view.bounds);
+          continue;
+        }
+        // The list no longer moves, or will not show the rest: those sources are not reached.
+        if (
+          view.all.length === 0 ||
+          unmoved >= SOURCE_LIST_END_SWIPES ||
+          screen > items.length + SOURCE_LIST_END_SWIPES
+        ) {
+          // The screen as it is now, before anything else is done on it, for finding out why
+          // the rest was not reached (design §12.2). Once per attempt.
+          if (this.recordDirectory !== undefined && this.linkStop === undefined)
+            this.linkStop = await this.captureLinkStop(this.recordDirectory);
+          listStop =
+            view.all.length === 0
+              ? "no_titles"
+              : unmoved >= SOURCE_LIST_END_SWIPES
+                ? "unmoved"
+                : "screen_limit";
+          stoppedBy = "list_not_moving";
+          rest(next, "not_reached");
+          return await finish();
+        }
+        for (let position = 0; at !== undefined && position < view.window.length; position += 1) {
+          const index = at + position;
+          if (index < next) continue;
+          // Sources the list went past without showing them whole.
+          for (let skipped = next; skipped < index; skipped += 1)
+            outcome[skipped] ??= { issue: "not_reached" };
+          const reason = halt();
+          if (reason) {
+            stop(index, reason);
+            return await finish();
+          }
+          // Where the same source is listed twice in a row, the same link is what a working copy
+          // gives the second time.
+          const same =
+            index > 0 &&
+            items[index - 1]!.title === items[index]!.title &&
+            items[index - 1]!.site === items[index]!.site;
+          const repeated = same ? outcome[index - 1] : undefined;
+          seen.opened += 1;
+          const got = await this.readLink(
+            contract,
+            links,
+            view.whole[position]!.node,
+            view.all.map(({ node }) => node),
+            previous,
+            repeated !== undefined && "copied" in repeated && repeated.copied === previous,
+          );
+          previous = got.clipboard;
+          this.lastLink = previous;
+          next = index + 1;
+          if (!got.closed) {
+            // Nothing more is opened over a page that stayed or without the panel it leads back to.
+            outcome[index] = { issue: "page_not_closed" };
+            stoppedBy = "page_not_closed";
+            rest(next, "not_attempted");
+            leftOpen = true;
+            return await finish();
+          }
+          outcome[index] =
+            got.issue !== undefined
+              ? { issue: got.issue }
+              : { copied: got.clipboard, restored: false };
+        }
+        if (at !== undefined) offset = at;
+        if (next >= items.length) break;
+        // Also before every swipe: a list whose screens give no source to open is not swiped
+        // through to its end once the time is up or a stop was requested.
+        const halted = halt();
+        if (halted) {
+          stop(next, halted);
+          return await finish();
+        }
+        await this.driver.swipe("up", 1, view.bounds);
+      }
+    } catch (error) {
+      if (!(error instanceof DriverError)) throw error;
+      stoppedBy = "driver_error";
+      driver = driverDetail(error);
+      rest(next, "not_attempted");
+      leftOpen = true;
+    }
+    return finish();
+  }
+  // The title views of the open panel: all of them, those the list does not cut with the source
+  // each shows, the place of these on screen, and their bounds. `atRest`: taken once the screen
+  // has stopped changing. Android's clipboard preview hides the views under it for a few seconds
+  // after a copy (real device: it covers the lower part of the screen), so a screen without a
+  // title is given that long to show one.
+  private async linkTitles(contract: SourcePath, atRest: boolean) {
+    const look = () => (atRest ? this.snapshotAtRest() : this.snapshot());
+    let all = titleItems(await look(), contract);
+    if (
+      all.length === 0 &&
+      (await this.waitFor({ ...contract.itemTitle!, pick: "first" }, COPY_SETTLE_MS))
+    )
+      all = titleItems(await look(), contract);
+    const whole = uncutTitles(all);
+    return {
+      all,
+      whole,
+      window: whole.map(({ item }) => item),
+      signature: JSON.stringify(whole.map(({ node }) => [node.text, node.bounds])),
+      bounds: unionBounds(all.map(({ node }) => node)),
+    };
+  }
+  // The link of one source, from the panel back to the panel. `closed`: the panel is on screen
+  // again and nothing of the page is. `clipboard`: what the clipboard holds afterwards.
+  private async readLink(
+    contract: SourcePath,
+    links: SourceLinks,
+    title: UiNode,
+    titles: readonly UiNode[],
+    previous: string,
+    repeated: boolean,
+  ): Promise<{ issue?: LinkIssue; clipboard: string; closed: boolean }> {
+    const leave = async (
+      issue: LinkIssue | undefined,
+      clipboard = previous,
+    ): Promise<{ issue?: LinkIssue; clipboard: string; closed: boolean }> => {
+      const closed = await this.leaveLinkPage(contract, links);
+      return { ...(issue ? { issue } : {}), clipboard, closed };
+    };
+    // Another App in front after a source was tapped: the back key until this App is in front
+    // again, then on to the page or the panel as below. A blocker or a system dialog keeps its
+    // class and nothing is pressed on it; an App that does not give way is a crash, as before.
+    const leaveForeign = async (
+      issue: LinkIssue | undefined,
+      clipboard = previous,
+    ): Promise<{ issue?: LinkIssue; clipboard: string; closed: boolean }> => {
+      await this.backToApp();
+      if (await this.visible(links.page)) return leave(issue, clipboard);
+      const panel = await this.waitFor(contract.panel, this.timings.stepTimeoutMs);
+      return { ...(issue ? { issue } : {}), clipboard, closed: panel !== undefined };
+    };
+    // A row tapped right after a page was left, or under the preview of a copy, can miss (real
+    // device, Doubao 15.7.0). Whether the page opened is looked at; a page that did not is given
+    // one more tap once the panel is at rest.
+    let page: UiElement | undefined;
+    for (let tap = 1; tap <= 2 && !page; tap += 1) {
+      if (tap > 1) {
+        // The first tap may have opened another App instead of a page (design §11.1).
+        if (!(await this.linkHealth())) return leaveForeign("left_app");
+        await this.snapshotAtRest();
+        if (!(await this.linkHealth())) return leaveForeign("left_app");
+      } else await this.assertHealthy();
+      // The page may have come after all.
+      if (tap > 1 && (await this.visible(links.page))) break;
+      const row = await this.linkRow(contract, title, titles);
+      if (!row) {
+        if (tap > 1) break;
+        return { issue: "row_not_found", clipboard: previous, closed: true };
+      }
+      await this.driver.tap(row);
+      page = await this.waitFor(links.page, PAGE_OPEN_MS);
+    }
+    if (!page && !(await this.visible(links.page))) {
+      if (!(await this.linkHealth())) return leaveForeign("left_app");
+      // Nothing opened: the panel must still be there for the next source.
+      const panel = await this.waitFor(contract.panel, this.timings.stepTimeoutMs);
+      return { issue: "page_not_opened", clipboard: previous, closed: panel !== undefined };
+    }
+    if (!(await this.linkHealth())) return leaveForeign("left_app");
+    const share = await this.waitFor(links.share, this.timings.stepTimeoutMs);
+    if (!share) {
+      if (!(await this.linkHealth())) return leaveForeign("left_app");
+      return leave("share_missing");
+    }
+    await this.driver.tap(share);
+    // The share control can open the App's own sheet or Android's (real device, Doubao 15.7.0 on
+    // Android 15: once in 12 sources, `com.android.intentresolver`). Whichever copy control
+    // shows first is used; the package of Android's sheet is tolerated in front only from here
+    // until the clipboard is read.
+    const system = links.systemShare;
+    const sheet = await this.shareSheet(links);
+    if (sheet === "foreign") return leaveForeign("share_external");
+    if (sheet === "none") return leave("copy_missing");
+    if (sheet === "system") {
+      // As the App's sheet: tapped once at rest, and the clipboard must have changed.
+      await this.snapshotAtRest();
+      const copy = await this.waitFor(system!.copy, this.timings.stepTimeoutMs);
+      if (!copy || !(await this.linkHealth(system!.package))) return leaveForeign("share_external");
+      await this.driver.tap(copy);
+      let text = await this.clipboardAfterCopy(previous);
+      if (text === previous) {
+        const again = await this.waitFor(system!.copy, 0);
+        if (again) {
+          await this.driver.tap(again);
+          text = await this.clipboardAfterCopy(previous);
+        }
+      }
+      if (text === previous && !repeated) return leaveForeign("share_external");
+      // The sheet usually closes itself after the copy; one that stays takes one back press,
+      // after a look for a crash or blocker.
+      if (
+        (await this.driver.foregroundPackage()) === system!.package &&
+        (await this.linkHealth(system!.package))
+      ) {
+        await this.driver.back();
+        await this.pause(PANEL_BACK_WAIT_MS);
+      }
+      return leaveForeign(isWebLink(text) ? undefined : "not_a_link", text);
+    }
+    // The App's own sheet also offers "more", which opens Android's sheet; the smoke of
+    // 2026-11-25 could not tell whether that is how Android's sheet came. Another package in
+    // front after the App's sheet showed is left with the back key as above, not taken for a
+    // crash (PRD R9); a link already copied is kept. `leaveForeign` looks for a crash or blocker
+    // before every press.
+    const leaveSheet = async (issue: LinkIssue | undefined, clipboard = previous) => {
+      const foreground = await this.driver.foregroundPackage();
+      if (foreground === null || foreground === this.contract.package)
+        return leave(issue, clipboard);
+      return leaveForeign(
+        issue === "copy_missing" || issue === "clipboard_unchanged" ? "share_external" : issue,
+        clipboard,
+      );
+    };
+    // A tap while the share sheet still slides in lands nowhere (real device, Doubao 15.7.0):
+    // "copy link" is tapped once the sheet is at rest.
+    await this.snapshotAtRest();
+    const copy = await this.waitFor(links.copy, this.timings.stepTimeoutMs);
+    if (!copy) return leaveSheet("copy_missing");
+    await this.driver.tap(copy);
+    let text = await this.clipboardAfterCopy(previous);
+    if (text === previous) {
+      // The sheet still showing means the tap missed it.
+      const again = await this.waitFor(links.copy, 0);
+      if (again) {
+        await this.driver.tap(again);
+        text = await this.clipboardAfterCopy(previous);
+      }
+    }
+    if (text === previous && !repeated) return leaveSheet("clipboard_unchanged");
+    return leaveSheet(isWebLink(text) ? undefined : "not_a_link", text);
+  }
+  // After a tap on a page's share control: which sheet shows its copy control, the App's own or
+  // Android's (where the contract declares it). "foreign": another package is in front instead,
+  // or Android's sheet is but its copy control did not show; "none": this App is in front and
+  // neither shows.
+  private async shareSheet(links: SourceLinks): Promise<"app" | "system" | "foreign" | "none"> {
+    const system = links.systemShare;
+    const deadline = this.now().getTime() + this.timings.stepTimeoutMs;
+    for (;;) {
+      if (await this.visible(links.copy)) return "app";
+      if (system && (await this.visible(system.copy))) return "system";
+      if (!(await this.linkHealth(system?.package))) return "foreign";
+      if (this.now().getTime() >= deadline) return (await this.linkHealth()) ? "none" : "foreign";
+      await this.pause(this.timings.lookupPollMs);
+    }
+  }
+  // The health check of the link read (design of task 11-24, §11.1). A system dialog and a
+  // blocker throw their class first, as in `assertHealthy`; another package in front is not a
+  // crash here but returns false, for the caller to leave with the back key. `allow`: a package
+  // that may be in front as well (Android's share sheet, while its copy is used).
+  private async linkHealth(allow?: string): Promise<boolean> {
+    if (await this.systemDialog())
+      throw new AppChannelError("app_crashed", undefined, "system_dialog");
+    for (const code of BLOCKER_ORDER)
+      for (const marker of this.contract.blockers[code])
+        if (await this.visible(marker))
+          throw new AppChannelError(code, undefined, "blocker_marker");
+    const foreground = await this.driver.foregroundPackage();
+    return foreground === null || foreground === this.contract.package || foreground === allow;
+  }
+  // Presses back, a bounded number of times, until this App is in front again. Every press is
+  // preceded by `linkHealth`: nothing is pressed on a blocker or a system dialog. An App that
+  // stays in front is a crash, as it is outside the link read.
+  private async backToApp(): Promise<void> {
+    for (let press = 1; press <= FOREIGN_BACK_PRESSES; press += 1) {
+      if (await this.linkHealth()) return;
+      await this.driver.back();
+      await this.pause(PANEL_BACK_WAIT_MS);
+    }
+    if (!(await this.linkHealth()))
+      throw new AppChannelError("app_crashed", undefined, "foreground_other");
+  }
+  // Up to the time Android's clipboard preview stays (`COPY_SETTLE_MS`), whether a title of
+  // `titles` shows on the panel.
+  private async waitForTitle(contract: SourcePath, titles: ReadonlySet<string>): Promise<void> {
+    const deadline = this.now().getTime() + COPY_SETTLE_MS;
+    for (;;) {
+      const found = await this.driver.find(contract.itemTitle!);
+      if (found.some((element) => titles.has(element.text.trim()))) return;
+      if (this.now().getTime() >= deadline) return;
+      await this.pause(this.timings.lookupPollMs);
+    }
+  }
+  // The row of `title` on the panel now. A title is known by its place where the screen still
+  // has a view there with its text, else as the n-th view with its text, n counted in the export
+  // it was found in. Up to the time Android's clipboard preview may hide it.
+  private async linkRow(
+    contract: SourcePath,
+    title: UiNode,
+    titles: readonly UiNode[],
+  ): Promise<UiElement | undefined> {
+    const text = title.text.trim();
+    const nth = titles.filter((node) => node.text.trim() === text).indexOf(title);
+    const deadline = this.now().getTime() + COPY_SETTLE_MS;
+    for (;;) {
+      const found = (await this.driver.find(contract.itemTitle!)).filter(
+        (element) => element.text.trim() === text,
+      );
+      const row =
+        found.find((element) => JSON.stringify(element.bounds) === JSON.stringify(title.bounds)) ??
+        found[nth];
+      if (row || this.now().getTime() >= deadline) return row;
+      await this.pause(this.timings.lookupPollMs);
+    }
+  }
+  // The clipboard after a copy, read again a few times while it still holds what it held before.
+  private async clipboardAfterCopy(previous: string): Promise<string> {
+    for (let read = 1; ; read += 1) {
+      const text = (await this.driver.readClipboard()).trim();
+      if (text !== previous || read >= LINK_CLIPBOARD_READS) return text;
+      await this.pause(this.timings.lookupPollMs);
+    }
+  }
+  // Leaves a source's page for the panel. The back key from the page leads straight back to the
+  // panel as it was left (real device, Doubao 15.7.0); a share sheet still open takes a press of
+  // its own. Returns whether the page is gone and the panel back.
+  private async leaveLinkPage(contract: SourcePath, links: SourceLinks): Promise<boolean> {
+    let gone = false;
+    if (!("back" in links.close)) {
+      const close = await this.waitFor(links.close, 0);
+      if (close) {
+        // As every press of the back key below: nothing is tapped on a crash or blocker.
+        await this.assertHealthy();
+        await this.driver.tap(close);
+        gone = await this.waitGone(links.page, this.timings.stepTimeoutMs);
+      }
+    }
+    if (!gone) await this.backOutOf(links.page, true);
+    if (await this.visible(links.page)) return false;
+    return (await this.waitFor(contract.panel, this.timings.stepTimeoutMs)) !== undefined;
   }
   // The open source list, read to its end, and the keyword line of its panel.
   private async readOpenList(
@@ -842,9 +1474,10 @@ class Screen {
       if (!(await this.visible(panel))) return;
     }
   }
-  // After the read of a source path that failed: leaves what the read left open, by the
-  // contract's own way of closing it and then by the back key: the path's source panel first,
-  // then the screen between entry and panel where it declares one. The screens of the
+  // After the read of a source path that failed, or a read of its links that did not end on its
+  // panel: leaves what the read left open, by the contract's own way of closing it and then by
+  // the back key: a source's page first where the path reads links, then the path's source
+  // panel, then the screen between entry and panel where it declares one. The screens of the
   // contract's other paths are not this read's to leave. Nothing is pressed while neither is on
   // screen, and the back key is not pressed on a crash or blocker screen (the caller has looked
   // for one right before this; every press looks again, since seconds pass between them). Best
@@ -854,7 +1487,12 @@ class Screen {
   async closeSourcePanel(contract: SourcePath): Promise<boolean> {
     let found = false;
     try {
-      for (const screen of [contract, ...(contract.via ? [contract.via] : [])]) {
+      // A source's page, where links are read, is over the panel and is left first.
+      for (const screen of [
+        ...(contract.links ? [{ panel: contract.links.page, close: contract.links.close }] : []),
+        contract,
+        ...(contract.via ? [contract.via] : []),
+      ]) {
         // The screen in between needs a moment to show again after the panel over it was left.
         const shown = found
           ? await this.waitFor({ ...screen.panel, pick: "first" }, this.timings.stepTimeoutMs)
@@ -885,7 +1523,8 @@ class Screen {
     for (const path of sourcePaths(this.contract))
       if (
         (await this.visible(path.panel)) ||
-        (path.via !== undefined && (await this.visible(path.via.panel)))
+        (path.via !== undefined && (await this.visible(path.via.panel))) ||
+        (path.links !== undefined && (await this.visible(path.links.page)))
       )
         return true;
     return false;
@@ -961,6 +1600,29 @@ class Screen {
       root = undefined;
     }
     return { screenshot, uiDump, root };
+  }
+  // The screen and hierarchy where the link read stopped because the list did not move, as
+  // `links-stop.png` and `links-stop.xml` in the record directory: private, created once, never
+  // replaced (as `capture`). Best effort: a part that cannot be taken is null, and nothing here
+  // fails the read or the sample.
+  async captureLinkStop(directory: string): Promise<NonNullable<AppRecord["linkStop"]>> {
+    let screenshot: FileEvidence | null = null;
+    let hierarchy: FileEvidence | null = null;
+    try {
+      const path = join(directory, "links-stop.png");
+      await this.driver.screenshot(path);
+      screenshot = await fileEvidence(path);
+    } catch {
+      screenshot = null;
+    }
+    try {
+      const path = join(directory, "links-stop.xml");
+      await writeFile(path, await this.driver.hierarchy(), { mode: 0o600, flag: "wx" });
+      hierarchy = await fileEvidence(path);
+    } catch {
+      hierarchy = null;
+    }
+    return { screenshot, hierarchy };
   }
   async leave(): Promise<void> {
     await this.driver.home().catch(() => undefined);
@@ -1102,7 +1764,15 @@ export class AppAdapter {
       return { answerId: null, status: "failed", failureCode: error.code, phase: "pre_send" };
     }
     const { serial, actual, appVersion, contract, driver } = prepared;
-    const screen = new Screen(driver, contract, this.timings, this.now, this.sleep, request.signal);
+    const screen = new Screen(
+      driver,
+      contract,
+      this.timings,
+      this.now,
+      this.sleep,
+      request.signal,
+      request.stopping,
+    );
 
     // An App that does not come up is like a failed pre-check: nothing was recorded or sent, so
     // there is no record and no answer ID.
@@ -1200,6 +1870,7 @@ export class AppAdapter {
     let recording: ActiveRecording;
     try {
       directory = await store.recordDirectory(batchId, answerId);
+      screen.recordDirectory = directory;
       recording = await this.options.recorder.start({ serial, answerId, directory });
     } catch (error) {
       await driver.close().catch(() => undefined);
@@ -1306,6 +1977,7 @@ export class AppAdapter {
         video: outcome.video,
         screenshot: captured.screenshot,
         uiDump: captured.uiDump,
+        ...(screen.linkStop ? { linkStop: screen.linkStop } : {}),
         ...(evidenceIssue !== undefined ? { evidenceIssue } : {}),
       });
 
@@ -1411,8 +2083,9 @@ export class AppAdapter {
     // command) leaves the sample without the sources of that path instead of failing it. Nothing
     // partial is kept.
     const readPath = async (path: SourcePath): Promise<Sources> => {
+      let sources: Sources;
       try {
-        return await screen.readCitations(path);
+        sources = await screen.readCitations(path);
       } catch (error) {
         const issue =
           error instanceof DriverError
@@ -1448,6 +2121,69 @@ export class AppAdapter {
         if (await screen.sourcePanelOpen()) throw changed("answer_end_not_visible");
         return { citations: [], searchQueries: [], status: "unreadable", issue };
       }
+      if (sources.links) {
+        logLinks(path, sources.citations, sources.links);
+        // The read of the links ended on a page that stayed, without the panel, or on a failed
+        // driver command, after which nothing says what is on screen. The list was
+        // read whole and its sources keep what was read of them; what is open is left as after
+        // a failed read, and with a page or panel still on screen nothing is saved.
+        if (sources.links.leftOpen) {
+          screen.linkPageLeftOpen = true;
+          // A panel that did not come back can be one a blocker took the place of (a
+          // verification after a source's page): as after a failed read, it keeps its own class,
+          // before anything is pressed, swiped or revealed on it.
+          const seen = await screen.blockingState();
+          if (seen) throw seen;
+          if (await screen.closeSourcePanel(path)) {
+            const now = await screen.blockingState();
+            if (now) throw now;
+          }
+          if (await screen.sourcePanelOpen()) throw changed("answer_end_not_visible");
+        }
+      }
+      return sources;
+    };
+    // One line per source whose link was not got and one per list: positions (from 1, in the
+    // order of the list), cause words and counts, never a title or a link.
+    const logLinks = (path: SourcePath, citations: readonly Citation[], read: LinkRead) => {
+      const list = path.label !== undefined ? { list: path.label } : {};
+      citations.forEach((source, index) => {
+        if (source.link && "issue" in source.link)
+          this.log({
+            event: "app_citation_link_missing",
+            answerId: attempt.answerId,
+            ...list,
+            index: index + 1,
+            issue: source.link.issue,
+          });
+      });
+      const copied = citations.filter((source) => source.link && "copied" in source.link);
+      this.log({
+        event: "app_citation_links",
+        answerId: attempt.answerId,
+        ...list,
+        total: citations.length,
+        withUrl: copied.length,
+        restored: copied.filter(
+          (source) => source.link && "copied" in source.link && source.link.restored,
+        ).length,
+        elapsedMs: read.elapsedMs,
+        ...(read.stoppedBy ? { stoppedBy: read.stoppedBy } : {}),
+        // The failed command's name and protocol error code, as in other failure lines.
+        ...(read.driver ? { driver: read.driver } : {}),
+        // How each screen of the list went, where the read ended early or left a source not
+        // reached (design §12.1); a read that got through has the line it always had.
+        ...(read.stoppedBy !== undefined ||
+        citations.some(
+          (source) => source.link && "issue" in source.link && source.link.issue === "not_reached",
+        )
+          ? {
+              screens: read.screens,
+              ...(read.screensDropped > 0 ? { screensDropped: read.screensDropped } : {}),
+              ...(read.listStop ? { listStop: read.listStop } : {}),
+            }
+          : {}),
+      });
     };
     const endVisible = async () =>
       (await screen.waitFor(contract.completion.marker, this.timings.stepTimeoutMs)) !== undefined;
@@ -1471,7 +2207,9 @@ export class AppAdapter {
           // the end of the answer must be back before the next path is begun, as it must be
           // before the sample is saved.
           if (
-            (lists.at(-1)!.status === "unreadable" || screen.sourceStepsOpened) &&
+            (lists.at(-1)!.status === "unreadable" ||
+              screen.sourceStepsOpened ||
+              screen.linkPageLeftOpen) &&
             !(await screen.revealEnd()) &&
             !(await endVisible())
           )
@@ -1529,6 +2267,9 @@ export class AppAdapter {
       // clipboard held before the run started cannot be told apart from an answer.
       const device = binding.device.id;
       if (this.lastCopied.get(device) === answer.text) throw changed("clipboard_unchanged");
+      // Nor is the link the last source's page put on the clipboard.
+      if (screen.lastLink !== undefined && screen.lastLink === answer.text)
+        throw changed("clipboard_unchanged");
       this.lastCopied.set(device, answer.text);
     }
     progress.answerText = answer.text;
@@ -1542,13 +2283,14 @@ export class AppAdapter {
     // sample would be saved over whatever screen the press led to).
     else if (
       !(await readSources()) &&
-      (progress.sources?.failed || screen.sourceStepsOpened) &&
+      (progress.sources?.failed || screen.sourceStepsOpened || screen.linkPageLeftOpen) &&
       !(await endVisible())
     )
       throw changed("answer_end_not_visible");
     // A panel that did not show in time when its entry was tapped may show later. The last look
-    // before the final screenshot: a failed source read never leaves its panel on a sample.
-    if (progress.sources?.failed && (await screen.sourcePanelOpen()))
+    // before the final screenshot: a failed source read never leaves its panel on a sample, nor
+    // does a read of links that had to be cleaned up its page.
+    if ((progress.sources?.failed || screen.linkPageLeftOpen) && (await screen.sourcePanelOpen()))
       throw changed("answer_end_not_visible");
   }
 }

@@ -111,6 +111,92 @@ public sealed class KnowledgeProductStoreSqlTests
         }
     }
 
+    // 租约过期且已执行 3 次的识别任务（例如 Worker 连续被杀）：领取时记为失败并让出队列，产品可以重新发起识别。
+    [KnowledgeProductMySqlFact]
+    public async Task ExpiredRunningParseJobAtAttemptCapIsFailedAtClaimAndFreesTheQueue()
+    {
+        var f = await Fixture.CreateAsync();
+        try
+        {
+            var product = await f.Store.CreateAsync(f.Tenant, f.Site, f.User, new KnowledgeProductWrite("重领上限产品", "人工介绍"));
+            var job = await f.Store.EnqueueParseAsync(f.Tenant, f.Site, product.ProductId, f.User, new ProductParseRequest(ProductParseJobKind.Completion));
+            await f.SimulateInterruptedRunsAsync(job.JobId, KnowledgeProductStore.MaxAttempts, order: 1);
+            await f.AssertOwnJobsSortFirstAsync();
+
+            Assert.Null(await f.Store.ClaimParseJobAsync("knowledge-product-reclaim-test", TimeSpan.FromMinutes(2)));
+
+            // 任务与 FailParseAsync 的失败分支一致：failed、写完成时间、清空租约；放弃不算一次新的执行。
+            var failed = (await f.Store.GetJobAsync(f.Tenant, f.Site, product.ProductId, job.JobId))!;
+            Assert.Equal("failed", failed.Status);
+            Assert.Equal("PRODUCT_PARSE_INTERRUPTED", failed.ErrorCode);
+            Assert.Equal("识别多次中断，请重新发起。", failed.ErrorMessage);
+            Assert.Equal(KnowledgeProductStore.MaxAttempts, failed.AttemptCount);
+            Assert.NotNull(failed.CompletedAt);
+            // 生成列 active_key 随 status 变为 NULL，不再占用「同一产品只有一个进行中任务」的唯一键。
+            Assert.Equal(1, await f.ScalarAsync("""
+                SELECT COUNT(*) FROM knowledge_product_parse_jobs
+                WHERE tenant_id=UUID_TO_BIN(@tenant) AND id=UUID_TO_BIN(@job)
+                  AND lease_owner IS NULL AND lease_until IS NULL AND active_key IS NULL;
+                """, ("@tenant", f.Tenant.ToString()), ("@job", job.JobId.ToString())));
+            Assert.Equal(KnowledgeProductStatus.ParseFailed, (await f.Store.GetAsync(f.Tenant, f.Site, product.ProductId))!.Status);
+
+            // 队列不再被挡住：同一产品可以重新发起识别，新任务被正常领取。
+            var retry = await f.Store.EnqueueParseAsync(f.Tenant, f.Site, product.ProductId, f.User, new ProductParseRequest(ProductParseJobKind.Completion));
+            await f.MoveToQueueFrontAsync(retry.JobId, order: 2);
+            await f.AssertOwnJobsSortFirstAsync();
+            var lease = await f.Store.ClaimParseJobAsync("knowledge-product-reclaim-test", TimeSpan.FromMinutes(2));
+            Assert.NotNull(lease);
+            Assert.Equal(retry.JobId, lease!.JobId);
+            Assert.Equal(1, lease.AttemptCount);
+            Assert.Equal("failed", (await f.Store.GetJobAsync(f.Tenant, f.Site, product.ProductId, job.JobId))!.Status);
+        }
+        finally
+        {
+            await f.CleanupAsync();
+        }
+    }
+
+    // 已执行 2 次的过期任务仍可重领（第 3 次执行）；这一次也中断后，第 4 次领取把它记为失败。
+    [KnowledgeProductMySqlFact]
+    public async Task ExpiredRunningParseJobBelowAttemptCapIsReclaimedUntilTheCapIsReached()
+    {
+        var f = await Fixture.CreateAsync();
+        try
+        {
+            var product = await f.Store.CreateAsync(f.Tenant, f.Site, f.User, new KnowledgeProductWrite("重领未达上限产品", "人工介绍"));
+            var job = await f.Store.EnqueueParseAsync(f.Tenant, f.Site, product.ProductId, f.User, new ProductParseRequest(ProductParseJobKind.Completion));
+            await f.SimulateInterruptedRunsAsync(job.JobId, KnowledgeProductStore.MaxAttempts - 1, order: 1);
+            await f.AssertOwnJobsSortFirstAsync();
+
+            var lease = await f.Store.ClaimParseJobAsync("knowledge-product-reclaim-test", TimeSpan.FromMinutes(2));
+
+            Assert.NotNull(lease);
+            Assert.Equal(job.JobId, lease!.JobId);
+            Assert.Equal(KnowledgeProductStore.MaxAttempts, lease.AttemptCount);
+            var running = (await f.Store.GetJobAsync(f.Tenant, f.Site, product.ProductId, job.JobId))!;
+            Assert.Equal("running", running.Status);
+            Assert.Equal(KnowledgeProductStore.MaxAttempts, running.AttemptCount);
+            Assert.Null(running.ErrorCode);
+            Assert.True(await f.Store.HeartbeatAsync(lease, TimeSpan.FromMinutes(2)));
+            Assert.Equal(KnowledgeProductStatus.Parsing, (await f.Store.GetAsync(f.Tenant, f.Site, product.ProductId))!.Status);
+
+            // 第 3 次执行同样中断、租约过期：下一次领取不再执行，直接记为失败。
+            await f.ExecAsync("""
+                UPDATE knowledge_product_parse_jobs SET lease_until=DATE_SUB(UTC_TIMESTAMP(6), INTERVAL 1 MINUTE)
+                WHERE tenant_id=UUID_TO_BIN(@tenant) AND id=UUID_TO_BIN(@job) AND status='running';
+                """, ("@tenant", f.Tenant.ToString()), ("@job", job.JobId.ToString()));
+            Assert.Null(await f.Store.ClaimParseJobAsync("knowledge-product-reclaim-test", TimeSpan.FromMinutes(2)));
+            var failed = (await f.Store.GetJobAsync(f.Tenant, f.Site, product.ProductId, job.JobId))!;
+            Assert.Equal("failed", failed.Status);
+            Assert.Equal("PRODUCT_PARSE_INTERRUPTED", failed.ErrorCode);
+            Assert.Equal(KnowledgeProductStatus.ParseFailed, (await f.Store.GetAsync(f.Tenant, f.Site, product.ProductId))!.Status);
+        }
+        finally
+        {
+            await f.CleanupAsync();
+        }
+    }
+
     private sealed class Fixture
     {
         private readonly string connectionString;
@@ -165,6 +251,34 @@ public sealed class KnowledgeProductStoreSqlTests
                      })
                 await ExecAsync(sql, ("@tenant", Tenant.ToString()));
         }
+
+        /// <summary>把本夹具的一个任务改成「已执行 attempts 次、租约已过期」的 running 状态，并排到全库队列最前（2000 年的 next_attempt_at）。</summary>
+        public Task SimulateInterruptedRunsAsync(Guid jobId, int attempts, int order)
+            => ExecAsync("""
+                UPDATE knowledge_product_parse_jobs SET status='running', attempt_count=@attempts, lease_owner='crashed-worker',
+                    lease_until=DATE_SUB(UTC_TIMESTAMP(6), INTERVAL 1 MINUTE),
+                    next_attempt_at=TIMESTAMP('2000-01-01 00:00:00') + INTERVAL @order SECOND, started_at=UTC_TIMESTAMP(6)
+                WHERE tenant_id=UUID_TO_BIN(@tenant) AND id=UUID_TO_BIN(@job) AND status='pending';
+                """, ("@attempts", attempts), ("@order", order), ("@tenant", Tenant.ToString()), ("@job", jobId.ToString()));
+
+        /// <summary>把本夹具的一个待处理任务排到全库队列最前。</summary>
+        public Task MoveToQueueFrontAsync(Guid jobId, int order)
+            => ExecAsync("""
+                UPDATE knowledge_product_parse_jobs SET next_attempt_at=TIMESTAMP('2000-01-01 00:00:00') + INTERVAL @order SECOND
+                WHERE tenant_id=UUID_TO_BIN(@tenant) AND id=UUID_TO_BIN(@job) AND status='pending';
+                """, ("@order", order), ("@tenant", Tenant.ToString()), ("@job", jobId.ToString()));
+
+        /// <summary>领取选全库最早的任务：若隔离库里留有比本测试更早的可领任务，断言会失去意义，直接报出来。</summary>
+        public async Task AssertOwnJobsSortFirstAsync()
+            => Assert.True(await ScalarAsync("""
+                SELECT COUNT(*) FROM knowledge_product_parse_jobs j
+                JOIN knowledge_products p ON p.tenant_id=j.tenant_id AND p.id=j.product_id
+                WHERE j.tenant_id <> UUID_TO_BIN(@tenant) AND p.status <> 'archived'
+                  AND ((j.status='pending' AND j.next_attempt_at <= UTC_TIMESTAMP(6))
+                    OR (j.status='running' AND j.lease_until < UTC_TIMESTAMP(6)))
+                  AND j.next_attempt_at < '2001-01-01 00:00:00';
+                """, ("@tenant", Tenant.ToString())) == 0,
+                "隔离库中存在 next_attempt_at 早于 2001 年的其他可领识别任务，会先于本测试的任务被领取。");
 
         public async Task ExecAsync(string sql, params (string Name, object? Value)[] parameters)
         {

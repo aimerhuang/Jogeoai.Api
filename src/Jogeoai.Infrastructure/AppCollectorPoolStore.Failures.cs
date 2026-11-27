@@ -9,6 +9,7 @@ namespace Jogeoai.Infrastructure;
 /// 失败上报的处理矩阵（implement 5.7，contract.md 第 9 节）与平台的恢复。任务的去向不取决于发送状态：当前租约的失败只结束这一次尝试，
 /// 任务回到队列，可由另一台设备领取（同一设备不再领取它）；没有失败次数上限，任务只受“每台设备尝试一次”和截止时点约束。
 /// 只有需要人工验证、App 拒绝模拟器和频率受限使任务终态并记为未采集。需要登录仍停止绑定，但任务照常回到队列。
+/// 迁移 052 起，还没有被运营批准的绑定的上报不生效（不写事件、不改任何状态），验证熔断和“全部绑定都被拒”只统计已批准的绑定。
 /// </summary>
 public sealed partial class AppCollectorPoolStore
 {
@@ -24,8 +25,21 @@ public sealed partial class AppCollectorPoolStore
             // Locks: binding → platform → task (→ credit account → check → run when the task becomes terminal).
             var binding = await LockBindingAsync(c, t, command.NodeId, command.BindingId, wholeDevice: false, ct);
             if (binding is null) return Reject<AppFailureResult>(await ForbidBindingAsync(c, t, command.NodeId, command.BindingId, "failures", ct));
-            var platform = await LockPlatformAsync(c, t, binding.PlatformCode, ct);
             AppBindingStopReason? current = AppContractNames.TryParse<AppBindingStopReason>(binding.StopReason, out var held) ? held : null;
+            // RF3. A binding the operator has not approved cannot affect anyone else: its report writes no event (so the
+            // verification breaker never counts it), changes neither the binding nor a task nor the platform, and does not
+            // even take the platform lock. The answer has the shape of a report for a lease that is no longer current, so the
+            // collector sees nothing new: the binding as it is (stopped, disabled_by_operator) and, with a task, "stale".
+            if (!binding.Approved)
+            {
+                var gate = await QuerySingleAsync(c, t,
+                    "SELECT paused_at IS NOT NULL FROM collector_app_platform_states WHERE platform_code = @platform;", ct,
+                    ("@platform", binding.PlatformCode));
+                return Done(new AppFailureResult(binding.Status == "active" ? AppBindingStatus.Active : AppBindingStatus.Stopped, current,
+                    command.Task is null ? null : CollectorTaskDisposition.Stale, gate is not null && Flag(gate[0]),
+                    !await EntryEnabledAsync(c, t, binding.PlatformCode, ct), null));
+            }
+            var platform = await LockPlatformAsync(c, t, binding.PlatformCode, ct);
             ReportedTaskRow? task = null;
             if (command.Task is { } reported)
             {
@@ -127,8 +141,10 @@ public sealed partial class AppCollectorPoolStore
             var paused = platform.Paused;
             if (!paused && AppPoolRules.CountsTowardVerificationBreaker(command.FailureCode))
             {
+                // Second line of defence for RF3: only bindings the operator approved are counted, whatever events exist.
                 var bindings = await QuerySingleAsync(c, t, """
                     SELECT COUNT(DISTINCT e.binding_id) FROM collector_app_events e
+                    JOIN collector_app_bindings b ON b.id = e.binding_id AND b.approved_at IS NOT NULL
                     WHERE e.platform_code = @platform AND e.event_kind = 'failure_reported'
                       AND e.occurred_at > UTC_TIMESTAMP(6) - INTERVAL @window MINUTE
                       AND JSON_UNQUOTE(JSON_EXTRACT(e.detail, '$.failureCode')) IN ('login_required', 'challenge_required')
@@ -147,7 +163,7 @@ public sealed partial class AppCollectorPoolStore
                 }
             }
             // implement 6.0b: one device's verdict does not stop the platform for everyone. The entry becomes unavailable only
-            // when every binding of the platform that the operator has not disabled is stopped with emulator_rejected (a
+            // when every approved binding of the platform that the operator has not disabled is stopped with emulator_rejected (a
             // platform with a single such binding qualifies on its one report). Reports of one platform are serialized by
             // the platform row lock, so the second of two concurrent reports sees the first one's binding.
             var unavailable = !await EntryEnabledAsync(c, t, binding.PlatformCode, ct);
@@ -174,7 +190,7 @@ public sealed partial class AppCollectorPoolStore
     {
         var row = await QuerySingleAsync(c, t, """
             SELECT COUNT(*), COALESCE(SUM(status = 'stopped' AND stop_reason = @rejected), 0) FROM collector_app_bindings
-            WHERE platform_code = @platform AND (stop_reason IS NULL OR stop_reason <> @operator);
+            WHERE platform_code = @platform AND approved_at IS NOT NULL AND (stop_reason IS NULL OR stop_reason <> @operator);
             """, ct, ("@platform", platformCode), ("@rejected", AppContractNames.ToStorage(AppBindingStopReason.EmulatorRejected)),
             ("@operator", AppContractNames.ToStorage(AppBindingStopReason.DisabledByOperator)));
         return row is not null && Int(row[0]) > 0 && Int(row[0]) == Int(row[1]);

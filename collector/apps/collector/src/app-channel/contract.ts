@@ -135,6 +135,50 @@ const countPattern = z
     }
   }, "needs a valid regular expression with exactly one capture group");
 
+// A query parameter name, as `unwrap` and `dropParams` name them.
+const paramNameSchema = z.string().regex(/^[A-Za-z0-9_.-]{1,64}$/u);
+// A host name in lower case, as the URL parser writes it.
+const hostSchema = z
+  .string()
+  .max(253)
+  .regex(/^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/u);
+// The link of every source, read one source at a time through what the App shows a user: the
+// source's title is tapped, the page it opens is shared with "copy link", the clipboard is read
+// through the driver and the page is left again (real device, Doubao 15.7.0: the panel lists
+// titles only; a title opens the App's own page without an address bar, whose share sheet has
+// "复制链接"). A source whose link is not got keeps its title, with `url` null and a fixed
+// cause word; the list itself is read as before. Only with `itemTitle`: the title view is what
+// is tapped.
+export const linksSchema = z
+  .object({
+    // Visible while the page a source opened is on screen.
+    page: selectorSchema,
+    // The page's share control.
+    share: selectorSchema,
+    // "Copy link" in the share sheet.
+    copy: selectorSchema,
+    // Leaves the page and leads back to the source panel: a control, or the back key.
+    close: closeSchema,
+    // Upper bound for reading the links of one answer, in seconds (default 180). The sources
+    // not opened by then keep their titles.
+    budgetSeconds: z.number().int().min(30).max(600).optional(),
+    // Restoration of the copied text (links.ts), offline: a host whose links carry the source's
+    // address in a parameter, and parameters the App appends to an address.
+    unwrap: z
+      .array(z.object({ host: hostSchema, param: paramNameSchema }).strict())
+      .max(5)
+      .optional(),
+    dropParams: z.array(paramNameSchema).max(20).optional(),
+    // Android's own share sheet, which a page's share control can open instead of the App's
+    // (real device, Doubao 15.7.0 on Android 15: `com.android.intentresolver`, its copy button
+    // `com.android.intentresolver:id/copy`). Its package is tolerated in front from the tap on
+    // `share` until the clipboard is read, and its copy button gives the link. Absent: such a
+    // sheet is left with the back key and the source has no link (`share_external`).
+    systemShare: z.object({ package: packageNameSchema, copy: selectorSchema }).strict().optional(),
+  })
+  .strict();
+export type SourceLinks = z.infer<typeof linksSchema>;
+
 // One way from the answer to a list of its sources: the entry, the screens it opens and how the
 // list is read and left.
 const sourcePathSchema = z
@@ -220,12 +264,26 @@ const sourcePathSchema = z
           .strict(),
       ])
       .optional(),
+    // Opens every source to read its link (see `linksSchema`).
+    links: linksSchema.optional(),
   })
   .strict()
   .refine(
     (value) => (value.itemTitle === undefined) !== (value.cards === undefined),
     "needs exactly one of itemTitle and cards",
   )
+  // A card is one view whose texts are fitted to slots; which view is the one to tap, and how a
+  // card is found again on the screen after its page was left, is not written yet. A list behind
+  // a screen in between is left through that screen, which the way back from a page knows
+  // nothing of.
+  .refine((value) => value.links === undefined || value.cards === undefined, {
+    path: ["links"],
+    message: "cannot be combined with cards",
+  })
+  .refine((value) => value.links === undefined || value.via === undefined, {
+    path: ["links"],
+    message: "cannot be combined with via",
+  })
   .refine(
     (value) =>
       value.cards === undefined || (value.itemSite === undefined && value.itemUrl === undefined),

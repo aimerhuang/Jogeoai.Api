@@ -183,6 +183,8 @@ public sealed partial class AppSiteTargetsTests
     }
 
     // Every store but the replay lookup fails the test when called: the refusal happens before any provider or run work.
+    // The caller is a system administrator: in Production the platforms shape is refused for anyone else (403 ADMIN_REQUIRED)
+    // before its channel is looked at; the targets shape never asks.
     private static VisibilityRunsController RunsController()
     {
         var context = new DefaultHttpContext();
@@ -195,7 +197,10 @@ public sealed partial class AppSiteTargetsTests
         return new VisibilityRunsController(StudioFakes.Unused<IVisibilityCollectorStore>(), StudioFakes.Unused<ICloroVisibilityStore>(),
             StudioFakes.Unused<ICloroSettingsStore>(), StudioFakes.Unused<ICloroKeyPool>(), StudioFakes.Unused<IAnswerProviderSettingsStore>(),
             StudioFakes.Unused<IManagementStore>(), replay, new TenantContextResolver(new TestEnvironment()),
-            StudioFakes.Unused<IAppCollectionStore>())
+            StudioFakes.Unused<IAppCollectionStore>(), new TestEnvironment(),
+            StudioFakes.Of<IResearchStore>((method, _) => method == nameof(IResearchStore.IsSystemAdministratorAsync)
+                ? Task.FromResult(true)
+                : throw new InvalidOperationException($"Unexpected call {method}")))
             { ControllerContext = new ControllerContext { HttpContext = context } };
     }
 

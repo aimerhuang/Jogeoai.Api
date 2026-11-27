@@ -62,7 +62,12 @@
 
 ## 4. 积分
 
-- 单价不变：每条检测 10 积分（`PromptMonitoringPricing.UnitPrice`），即每条提问 × 每个单元格 × 每个采样 × 每轮 10 积分。同一模型两种模式都开时，每轮算两条检测，各扣 10 积分。手动采集不扣项目积分。
+- 单价不变：每条检测 10 积分（`PromptMonitoringPricing.UnitPrice`），即每条提问 × 每个单元格 × 每个采样 × 每轮 10 积分。同一模型两种模式都开时，每轮算两条检测，各扣 10 积分。
+- **手动采集与采集计划同价计费（Trellis `11-27-sec-manual-run-charging`，本机 API / Worker 已于 2026-11-27 用该构建重启，预占与结算没有运行态验证，见 §9）**：是否计费不看计划名称，也不看客户端提交的任何字段，凡是会产生真实 Provider 调用的采集都先预占积分。
+  - `POST /api/v1/visibility-runs` 的 `previewId` / `targetIds` / `tagIds` 形态和 `targets` 形态：创建运行时预占「检测数 × 10」，余额不足返回 402 `CREDIT_INSUFFICIENT`，不创建运行；同一 `Idempotency-Key` 重放返回原运行，不重复预占。系统管理员发起的手动采集同样扣所在租户的积分。结算规则与每日监控相同（提交成功扣除，未提交即失败的释放）。
+  - 所有采集计划（每日监控主计划、凌晨计划和用户在 `collection-schedules` 自建的计划）的时隙运行都预占积分。余额不足时该时隙记为 `skipped`、`skip_code=CREDIT_INSUFFICIENT`，计划保持启用，下一个时隙照常尝试。只有每日监控计划按提问的平台范围展开，自建计划仍是提问 × 目标的全量组合。
+  - `platforms` 形态（国内网页采集通道）不计费，见 §9。
+  - 采集预览 `CollectionPreviewView.estimatedAmount` 返回「预期检测数 × 10」，即按该预览创建运行时会预占的积分。
 - 每周预估（`targets/estimate`）：
 
   ```
@@ -112,5 +117,68 @@
 - 计费视图不含 00:05 那一轮；`prompt-monitoring/estimate` 的每轮数是所有单元格同时到期时的上限（见 §4）。
 - 文章工作台的目标快照里，同时开两种模式的模型会出现两次，只影响上下文文字。
 - `CollectionPreviewView.targets[].frequency` 总是 daily；手动采集不看频率。
+- 积分流水中手动采集和自建计划的预占、结算沿用「每日监控预留 / 每日监控已提交」等文案，没有按来源区分。
 - 看板按 Provider + 引擎 + 地区合并同一模型的两种模式；回答记录没有按回答模式筛选的参数；MCP 输出不含回答模式。
 - 回答详情里原有的「采集来源」浮层仍显示 Provider 名称。
+
+## 9. 手动采集与采集计划的计费、名称和权限（2026-11-27）
+
+Trellis `11-27-sec-manual-run-charging`。没有数据库迁移。状态（2026-11-27）：
+
+- 代码与不连库的定向测试已完成。
+- SQL 测试已在本机隔离测试库（已执行 001–052）运行：`ManualRunChargingSqlTests`、`CollectionScheduleSqlTests`、`InstantCollectionSqlTests`、`AnswerModeSqlTests` 合计 22 项通过（首次运行 19 项通过、1 项跳过；跳过的用例随后接上提问范围测试库运行，所在测试类 3/3 通过），`PromptImportSqlTests` 9 项通过。`GeminiAnswerPersistenceSqlTests` 没有运行：它只接受 33318 端口的专用实例，本机没有。
+- 本机 5260 API 与 Worker 已于 2026-11-27 22:07 用该构建重启，健康检查为 200；`prompt-monitoring`、`collection-schedules`、`visibility-runs`、`targets` 的只读接口经 Development 的 `X-Tenant-Id` 兼容桥返回 200。
+- 没有运行态验证的：手动采集和自建计划时隙的积分预占与结算，以及下面的名称、数量和权限规则（只有上述测试证据）。
+
+### 计费
+
+见 §4。计费只取决于运行是否带预占项，与计划名称、`requested_by`、Provider 无关。
+
+### 计划名称与数量
+
+| 情形 | 结果 |
+|---|---|
+| 创建计划，名称是每日监控主计划或凌晨计划的保留名称 | 409 `SCHEDULE_NAME_RESERVED` |
+| 自建计划改名为上述保留名称 | 409 `SCHEDULE_NAME_RESERVED` |
+| 每日监控主计划或凌晨计划改名 | 409 `SCHEDULE_NAME_LOCKED` |
+| 站点的自建计划已达上限后再创建 | 409 `SCHEDULE_LIMIT_REACHED` |
+| 创建或改名为 App 采集计划的名称 | 400 `INVALID_SCHEDULE_NAME`（原有行为，未变） |
+
+- 保留名称的判断不区分大小写、全角 / 半角、重音符号和不可见字符：`collection_schedules.name` 列的排序规则是 `utf8mb4_0900_ai_ci`，这些写法在按名称查询计划时与保留名称相等。这类写法（包括 App 采集计划名称的变体）一律返回 409 `SCHEDULE_NAME_RESERVED`。
+- 判断分两步，以第二步为准。第一步在应用层按 Unicode 规范化折叠后比较（`PromptMonitoringIdentity.IsReservedScheduleName`），不访问数据库，是近似判断：没有 Unicode 分解、但排序规则视为与基本字母相等的写法（如带删除线的 `ø`）会通过这一步。第二步在创建或改名的同一事务内，写入后由 MySQL 按 `name` 列自身的排序规则把这一行与三个保留名称比较（`CollectionScheduleStore.HasReservedNameAsync`，与对账逻辑按名称查计划用的是同一种比较），相等就不提交事务，返回 409 `SCHEDULE_NAME_RESERVED`。第二步除了一条按源码文本固定调用顺序的测试，还有隔离库用例，已于 2026-11-27 在本机隔离库运行并通过（比较由 MySQL 按 `utf8mb4_0900_ai_ci` 完成）。隔离库用例对 `ø` 是先问 MySQL 再按结果断言，所以用例通过不说明该排序规则把 `ø` 视为等于 `o`。
+- 这次改动之前已经存在的、名称与保留名称仅写法不同的自建计划不会被处理（改名才会触发判断）；这类计划可能被按名称查询的对账逻辑当成监控计划。发布前盘点时请用 `name IN (...)` 按列的排序规则查询，再与精确名称比对。计费不依赖名称，所以这不是计费绕过。
+- 每日监控计划只由服务端内部创建（`ICollectionScheduleStore.CreateAutomaticPlanAsync`，调用方只有 `PromptMonitoringService`），不经过保留名称与数量上限校验；公开接口只调用 `CreateAsync`。
+- 上限由配置 `Collection:Schedules:MaxCustomPerSite` 决定，默认 20，只在 API 进程读取。启用和停用的自建计划都计入；主计划、凌晨计划和 App 采集计划不计入。
+- 已知限制：上限不是严格上限。数量在创建事务内统计，该事务对站点行持有的是共享锁（`FOR SHARE`），不串行化同一站点的并发创建，并发请求可能同时通过检查，使计划数超过上限。上限只限制计划行数，不影响计费（每个计划的时隙都计费）。
+- 已知限制：采集计划没有删除接口，也没有删除计划的代码路径。达到上限后只能修改并复用已有计划（停用的计划同样计入），所以上限实际是每个站点累计能创建的自建计划数。
+- 改名前已经被改过名的历史计划不做数据修复：它们现在是自建计划，时隙同样计费。
+
+### 已知限制：预占长期不结算的情形
+
+预占在检测提交成功时扣除、在任务终态失败（且未提交到外部）时释放。下面两种情形任务到不了终态，预占一直是 `held`，对应积分留在「已预占」里不回到可用余额。这两种情形在每日监控中原本就存在；手动采集计费之后，用户发起的手动采集也会遇到。只读了源码，没有用真实任务验证；目前没有自动释放，需要人工处理。
+
+- **对应 Provider 的 Worker 没有运行或被关闭**（`Doubao:Worker:Enabled=false`、`DeepSeek:Worker:Enabled=false`、`Packy:Worker:Enabled=false`，或 Worker 进程不在）：任务停在 `pending`。创建手动采集时接口只检查 Provider 是否已配置，不检查 Worker 是否在运行，所以运行可以创建成功并预占。关闭某个 Worker 之前先停用对应目标，或确认没有待处理任务。
+- **任务租约反复过期**（Worker 在调用中途崩溃或被重启、单次调用超过租约时长）：过期的任务回到 `pending` 重新领取，这条路径没有次数上限（重试次数上限只在 Worker 收到 Provider 错误时生效）。
+
+另外两条沿用既有规则、不属于本次改动：已提交到 Cloro 后失败的任务不退还；提交结果不明（`submission_unknown`）的检测保持预占，等人工对账。
+
+### 发起人标识
+
+`visibility_runs.requested_by` 由服务端写入：有会话用户时为 `user:{userId:N}`，Development 的 `X-Tenant-Id` 兼容桥（没有会话用户）为 `dev-bridge`。请求体中的 `requestedBy` 保留以兼容旧客户端，只参与 HTTP 请求摘要，不存储，也不参与任何判断。「当天是否已有监控运行」的判断（`prompt-monitor:{siteId}`、`schedule:{planId}`、`prompt-instant:{siteId}`）因此不会被手动采集命中。
+
+兼容性：没有 `http_request_hash` 的早期运行（该列引入之前创建）用原幂等键重放时，会与新的服务端发起人标识比对不上，返回 409 `RUN_IDEMPOTENCY_CONFLICT`。有 `http_request_hash` 的运行重放不受影响。
+
+### `platforms` 形态（国内网页采集通道）
+
+- 非 Development 环境只允许系统管理员发起，其他人返回 403 `ADMIN_REQUIRED`，在幂等重放查询和任何运行存储调用之前判定。Development 下行为不变（`X-Tenant-Id` 兼容桥和已登录成员都可以发起）。
+- 每次最多 200 个 Prompt、20 个平台入口，超出返回 400 `INVALID_RUN`。
+- 这条通道不预占积分。
+
+### 上线前后
+
+- 发布后，已有的自建计划从下一个时隙开始计费；余额不足的租户会看到时隙被跳过。**发布前在目标库盘点自建计划**（名称不是三个保留名称的计划）的数量、所属租户和启用状态。本机开发库 `jogeoai` 由协调方在 2026-11-27 只读核对：没有自建计划，只有 3 个租户的 5 个主计划、1 个停用的凌晨计划和 1 个 App 采集计划，所以本机没有计划会因此开始计费。其他运行库尚未核对。
+- 运营在本机用 `platforms` 形态 + Development 发起的国内采集不受影响。用 `targets` / `previewId` 形态做的手动采集会扣所在租户的积分，需要时由系统管理员用现有的积分发放接口补充。
+- 验证脚本 `tests/stage1_api_smoke.py` 与 `tests/doubao_api_smoke.py` 用 `targets` / `previewId` 形态创建手动运行，现在同样预占积分：测试租户余额不足时脚本会在创建运行处得到 402。两个脚本没有随本次改动修改，也没有重新运行过。
+- API 与 Worker 需要一起发布：计划时隙由 Worker 生成和处理。
+- 回滚：还原代码后重启 API 与 Worker。已经预占或扣除的积分不随代码回滚，需要时用积分发放接口人工调整。
+- 前端 `Jogeoai.web` 的类型尚未按新契约重新生成（`requestedBy` 的说明、`estimatedAmount` 有值、新的状态码）。

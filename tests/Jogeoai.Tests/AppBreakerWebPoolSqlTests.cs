@@ -6,7 +6,7 @@ namespace Jogeoai.Tests;
 
 /// <summary>
 /// 总 PRD AC-C10 后半句的网页一侧：同一平台（doubao）App 的验证熔断把 App 平台暂停后，网页账号池对同一平台的领取照常派发。
-/// 用网页账号池的隔离库 JOGEOAI_COLLECTOR_POOL_TEST_CONNECTION（jogeoai_collector_pool_test_app049，已执行 049），
+/// 用网页账号池的隔离库 JOGEOAI_COLLECTOR_POOL_TEST_CONNECTION（jogeoai_collector_pool_test_app049，须已执行 049、051 与 052），
 /// 复用 <see cref="CollectorSessionPoolSqlTests.PoolFixture"/>；未设置时跳过。App 一侧的节点、绑定、审计事件在用例结束时删除，
 /// doubao 的 App 平台状态行恢复成用例开始前的内容。网页夹具建的租户与 CollectorSessionPoolSqlTests 的其他用例一样留在该库里。
 /// </summary>
@@ -48,7 +48,10 @@ public sealed class AppBreakerWebPoolSqlTests
                 await app.RegisterNodeAsync(node, null);
                 var result = await app.ReportBindingsAsync(new AppBindingReportCommand(node, "test-rev",
                     [new AppBindingReport(device, "doubao", $"doubao-{Guid.NewGuid():N}", "pkg.doubao", "1.0", "1.0", "15", "ok")]));
-                return Assert.Single(result.Bindings).BindingId;
+                var binding = Assert.Single(result.Bindings).BindingId;
+                // Migration 052: a new binding waits for the operator's approval; only approved bindings count towards the breaker.
+                Assert.True(await app.ResumeBindingAsync(binding, null));
+                return binding;
             }
             var (first, second, third) = (await BindAsync("AVD_1"), await BindAsync("AVD_2"), await BindAsync("AVD_3"));
             Assert.False((await app.ReportFailureAsync(new AppFailureCommand(nodes[0], first, AppFailureCode.ChallengeRequired, CollectorPhase.Probe, null))).PlatformPaused);

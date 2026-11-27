@@ -461,6 +461,43 @@ export function referenceContract(reviewedAt = "2026-11-14T04:00:00.000Z") {
   };
 }
 
+// The parameters the reference App appends to a copied link, and the host of its redirect, as
+// seen on the real device (task 11-24 research). Every address in a test is a placeholder.
+export const LINK_APP_PARAMS = [
+  "use_xbridge3",
+  "loader_name",
+  "need_sec_link",
+  "sec_link_scene",
+  "theme",
+] as const;
+export const LINK_WRAPPER_HOST = "link.wtturl.cn";
+// The `links` part of a source path for `MockChatApp` with `sourcePages`: the title opens the
+// App's own page, whose share sheet copies the link. The page is recognised by its content
+// view, so that a page without a share control can be told from one that did not open.
+export function linksFixture(): Record<string, unknown> {
+  return {
+    page: { id: "com.larus.nova:id/bullet_container" },
+    share: { id: "com.larus.nova:id/btn_share" },
+    copy: { text: "复制链接" },
+    close: { back: true },
+    unwrap: [{ host: LINK_WRAPPER_HOST, param: "target" }],
+    dropParams: [...LINK_APP_PARAMS],
+  };
+}
+// `referenceContract` whose source path also reads every source's link. Synthetic, like
+// `referenceContract`.
+export function linksContract(reviewedAt = "2026-11-14T04:00:00.000Z") {
+  const contract = referenceContract(reviewedAt);
+  contract.citations.links = { ...linksFixture(), systemShare: systemShareFixture() };
+  return contract;
+}
+// Android's own share sheet as seen on the real device (Android 15), and as `MockChatApp`
+// shows it for a source with `systemShare`.
+export const SYSTEM_SHARE_PACKAGE = "com.android.intentresolver";
+export function systemShareFixture(): Record<string, unknown> {
+  return { package: SYSTEM_SHARE_PACKAGE, copy: { id: `${SYSTEM_SHARE_PACKAGE}:id/copy` } };
+}
+
 // A contract for an App that draws its own screen (design §16.8, `MockIconApp`): its controls
 // are image views without any label, and every text is a content description. Synthetic, like
 // `referenceContract`; it keeps that fixture's platform and package so the same bindings apply.

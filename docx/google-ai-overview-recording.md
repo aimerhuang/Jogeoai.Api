@@ -40,7 +40,7 @@ Google 不是每次都会展示 AI 概览。没有展示时，Cloro 返回 200 �
 ## 5. 费用
 
 - 每次请求 5 Cloro 额度：Google Search 基础 3，加 AI 概览附加 2。没有展示概览也照样扣。
-- 每日监控按“有效问题 × 10 项目积分”计算，手动 Run 不扣项目积分。
+- 每日监控按“有效问题 × 10 项目积分”计算。手动 Run 自 2026-11-27 起同价预占项目积分，余额不足返回 402 `CREDIT_INSUFFICIENT`（Trellis `11-27-sec-manual-run-charging`，代码已实现，本机 API / Worker 尚未用该构建重启；见[品牌监控配置说明](brand-monitoring-config.md) §4、§9）；在此之前手动 Run 不扣项目积分。
 
 ## 6. 验证状态
 

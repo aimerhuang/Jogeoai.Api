@@ -65,7 +65,7 @@
 
 自动监控费用为“有效问题 × 目标 × 采样 × 10 项目积分”。5 个问题、ChatGPT/Gemini/Copilot 三目标、单采样预计每轮 150 积分，比两目标增加 50 积分。余额不足不开始新的收费提交。
 
-现有手动运行默认不扣项目积分，仍产生实际 Cloro 用量。自动监控预留、结算和释放沿用现役规则，不保证外部任务受理后的失败退款。viewer 保持只读边界，Target PUT 与手动 Run POST 在写入前拒绝；手动 Run 返回 `403 CONTENT_FORBIDDEN`，拒绝发生在幂等查询和 Store/Provider 调用前。监控 POST 对 viewer 仅查询状态，Run/Check 的授权读入口保留。
+手动运行自 2026-11-27 起与自动监控同价预占项目积分（检测数 × 10），余额不足返回 402 `CREDIT_INSUFFICIENT` 且不创建运行（Trellis `11-27-sec-manual-run-charging`，代码已实现，本机 API / Worker 尚未用该构建重启；规则见[品牌监控配置说明](brand-monitoring-config.md) §4、§9）。在此之前手动运行不扣项目积分，只产生实际 Cloro 用量，本文记录的手动实测都属于这一时期。自动监控预留、结算和释放沿用现役规则，不保证外部任务受理后的失败退款。viewer 保持只读边界，Target PUT 与手动 Run POST 在写入前拒绝；手动 Run 返回 `403 CONTENT_FORBIDDEN`，拒绝发生在幂等查询和 Store/Provider 调用前。监控 POST 对 viewer 仅查询状态，Run/Check 的授权读入口保留。
 
 有外部任务 ID 的任务恢复后继续轮询原任务；提交结果不明保留 `submission_unknown`，不自动重新提交。正文、引用、质量、终态及分析入队保持原子保存，重复完成不产生第二份结果。
 

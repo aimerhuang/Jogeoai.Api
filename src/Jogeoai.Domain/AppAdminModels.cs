@@ -52,6 +52,10 @@ public static class AppAdminRules
     public static bool PlatformLimitsValid(int minIntervalSeconds, int? dailyCap)
         => minIntervalSeconds is >= MinPlatformIntervalSeconds and <= MaxPlatformIntervalSeconds
            && dailyCap is null or (>= 1 and <= MaxPlatformDailyCap);
+
+    /// <summary>运营设置的节点设备上限是否在范围内（1–<see cref="AppPoolRules.MaxDevicesPerNodeLimit"/>，与迁移 052 的 CHECK 相同）。</summary>
+    /// <param name="maxDevices">设备上限。</param>
+    public static bool MaxDevicesValid(int maxDevices) => maxDevices is >= 1 and <= AppPoolRules.MaxDevicesPerNodeLimit;
 }
 
 /// <summary>运营视图里的一个 App 采集节点（一台电脑上的采集器）。不含令牌或令牌哈希。</summary>
@@ -66,7 +70,14 @@ public static class AppAdminRules
 /// <param name="CreatedAt">登记时间。</param>
 /// <param name="UpdatedAt">最近一次修改时间。</param>
 public sealed record AppNodeView(string NodeId, AppNodeStatus Status, DateTimeOffset? LastSeenAt, DateTimeOffset? LastActivityAt, bool Offline,
-    string? CollectorBuildRevision, int Bindings, int ActiveBindings, DateTimeOffset CreatedAt, DateTimeOffset UpdatedAt);
+    string? CollectorBuildRevision, int Bindings, int ActiveBindings, DateTimeOffset CreatedAt, DateTimeOffset UpdatedAt)
+{
+    /// <summary>
+    /// 该节点可登记的不同设备（AVD）数上限，默认 4，范围 1–64；超出上限的新设备的绑定在上报时被拒绝（device_limit_exceeded），不入库。
+    /// 用 PUT nodes/{nodeId}/max-devices 调整。
+    /// </summary>
+    public int MaxDevices { get; init; } = AppPoolRules.DefaultMaxDevicesPerNode;
+}
 
 /// <summary>运营对节点的一次启停操作的结果。</summary>
 /// <param name="Changed">true 表示状态确实发生了变化（并写了审计事件）；false 表示本来就是目标状态。</param>
@@ -100,7 +111,17 @@ public sealed record AppBindingAdminView(Guid Id, string NodeId, string DeviceId
     string? ReviewedAppVersion, string? InstalledAppVersion, string? AndroidVersion, AppBindingStatus Status, AppBindingStopReason? StopReason,
     DateTimeOffset? StoppedAt, long? StoppedSeconds, DateTimeOffset? CooldownUntil, bool Offline, DateTimeOffset? LastSeenAt,
     DateTimeOffset? LastLeasedAt, DateTimeOffset? LastSuccessAt, int MinIntervalSeconds, int? DailyQuota, DateTimeOffset CreatedAt,
-    DateTimeOffset UpdatedAt);
+    DateTimeOffset UpdatedAt)
+{
+    /// <summary>
+    /// 是否待批准：true 表示这条绑定还没有被运营批准过。待批准的绑定不能领取任务，它的失败上报不写事件、不计入平台熔断；
+    /// 它的停止原因显示为 disabled_by_operator。调用恢复接口（POST bindings/{bindingId}/resume）即批准。
+    /// </summary>
+    public bool ApprovalPending { get; init; }
+
+    /// <summary>运营批准这条绑定的时间；待批准时为空。批准之后再被停用、恢复，这个时间不变。迁移 052 之前登记的绑定取登记时间。</summary>
+    public DateTimeOffset? ApprovedAt { get; init; }
+}
 
 /// <summary>运营对绑定的一次操作的结果。</summary>
 /// <param name="Changed">true 表示绑定确实发生了变化（并写了审计事件）；false 表示本来就是目标状态或目标取值。</param>

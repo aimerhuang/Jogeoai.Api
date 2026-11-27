@@ -36,6 +36,7 @@ Jogeoai 是 AI 可见性服务的 .NET 后端，提供采集、分析、品牌�
 - 采集器账号池依赖 035，必须用 root 执行，见 [账号池说明](docx/collector-account-pool.md)。MCP 只读访问依赖 044，先迁移再发布 API，见 [MCP 访问说明](docx/mcp-access.md)。
 - 品牌监控「回答模式 × 采集频率」依赖 047，须先迁移再同时发布 API/Worker，见 [品牌监控配置说明](docx/brand-monitoring-config.md)。团队默认监控配置依赖 048，先迁移再发布 API，见 [团队默认监控配置说明](docx/team-monitoring-config.md)。本机验收、配置版本和未验证项只在 README / 模块说明保留，不在规则中重复快照。
 - App 渠道采集依赖 049（可以用应用账号执行，不需要 root）。须先在目标库执行迁移，再同时发布 API 和 Worker；两者的 `Collector:AppTenantIds` 默认为空，即不对任何租户开放。本机 `jogeoai` 已于 2026-11-17 执行 049 并重启 API / Worker。见 [App 渠道说明](docx/app-channel.md)。
+- App 绑定审批与节点设备上限依赖 052（可以用应用账号执行，不需要 root）。须先迁移，再同时发布 API 和 Worker；之后新增的模拟器或平台绑定要在后台批准一次。本机 `jogeoai` 已于 2026-11-27 执行 052 并重启 API / Worker。见 [App 渠道说明](docx/app-channel.md)。
 - Cloro key 池依赖 022；目标库须先执行迁移再发布 API/Worker，运维及回滚见 [Cloro key 池说明](docx/cloro-key-pool.md)。迁移与本机验收不能推导其他运行库已部署。
 - 下一步按各模块待验收项补 API + MySQL + Worker 端到端证据；已有真实轮次、隔离 SQL、性能和完整 PRD 验收分别记录。
 - 收尾时同步现状文档；清理数据卷或会话残留前列明对象并取得确认。

@@ -340,7 +340,7 @@ public sealed class InstantCollectionSqlTests
 
     // An enabled 09:01 main plan (next slot in the future) over the seeded prompt and both cells; no run is created.
     private static Task<CollectionScheduleView> CreatePlanAsync(MySqlDatabase database, Guid tenant, Guid site, Guid prompt)
-        => new CollectionScheduleStore(database).CreateAsync(new CreateCollectionScheduleCommand(tenant, site, PromptMonitoringIdentity.ScheduleName,
+        => new CollectionScheduleStore(database).CreateAutomaticPlanAsync(new CreateCollectionScheduleCommand(tenant, site, PromptMonitoringIdentity.ScheduleName,
             "daily", null, PromptMonitoringIdentity.MainLocalTime, Zone, new CollectionScheduleSelection([prompt], [ChatGpt, Gemini]), Enabled: true));
 
     private sealed record SlotRow(string Status, string? SkipCode, string? SkipMessage, string? RunId, string Json, CollectionScheduleSelection Selection);

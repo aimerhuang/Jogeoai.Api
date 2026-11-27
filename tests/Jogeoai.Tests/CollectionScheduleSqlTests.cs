@@ -24,6 +24,16 @@ public sealed class CollectionScheduleSqlTests
         var promptId = Guid.NewGuid();
         var versionId = Guid.NewGuid();
         await SeedAsync(connectionString, tenantId, siteId, promptId, versionId);
+        // Every plan's slot run reserves credits (11-27-sec-manual-run-charging): without a balance the custom slot below
+        // would be skipped with CREDIT_INSUFFICIENT instead of creating its Run.
+        await using (var connection = new MySqlConnection(connectionString))
+        {
+            await connection.OpenAsync();
+            await ExecuteAsync(connection, null, """
+                INSERT INTO credit_accounts (tenant_id,available_credits,lifetime_granted,updated_at)
+                VALUES (UUID_TO_BIN(@tenant),1000,1000,UTC_TIMESTAMP(6));
+                """, ("@tenant", tenantId.ToString()));
+        }
         var selection = new CollectionScheduleSelection([promptId], [new CloroVisibilityTarget("cloro", "chatgpt", "en-US", "US")], 1);
 
         var created = await schedules.CreateAsync(new CreateCollectionScheduleCommand(tenantId, siteId,
@@ -79,6 +89,12 @@ public sealed class CollectionScheduleSqlTests
         Assert.Equal(1, await CountAsync(connectionString,
             "SELECT COUNT(*) FROM schedule_slots WHERE id=UUID_TO_BIN(@slot) AND status='completed' AND run_id IS NOT NULL;",
             ("@slot", slot.Id.ToString())));
+        // The custom plan's slot run holds exactly one reservation of 1 check × the unit price, also after the two-worker race.
+        Assert.Equal(1, await CountAsync(connectionString, """
+            SELECT COUNT(*) FROM monitoring_credit_reservations reservation
+            JOIN schedule_slots slot ON slot.run_id=reservation.run_id
+            WHERE slot.id=UUID_TO_BIN(@slot) AND reservation.held_credits=@held AND reservation.status='held';
+            """, ("@slot", slot.Id.ToString()), ("@held", PromptMonitoringPricing.UnitPrice)));
 
         // A target disabled after materialization skips a fresh slot, but a committed Run is still recoverable.
         await using (var connection = new MySqlConnection(connectionString))
@@ -193,7 +209,7 @@ public sealed class CollectionScheduleSqlTests
                 """, ("@tenant", tenantId.ToString()));
         }
         var selection = new CollectionScheduleSelection([promptId], [new CloroVisibilityTarget("cloro", "chatgpt", "en-US", "US")], 1);
-        var plan = await schedules.CreateAsync(new CreateCollectionScheduleCommand(tenantId, siteId,
+        var plan = await schedules.CreateAutomaticPlanAsync(new CreateCollectionScheduleCommand(tenantId, siteId,
             PromptMonitoringIdentity.ScheduleName, "daily", null, "09:00", "UTC", selection, Enabled: true));
         try
         {
@@ -281,7 +297,7 @@ public sealed class CollectionScheduleSqlTests
                 VALUES (UUID_TO_BIN(@tenant),1000,1000,UTC_TIMESTAMP(6));
                 """, ("@tenant", tenantId.ToString()));
         }
-        var plan = await schedules.CreateAsync(new CreateCollectionScheduleCommand(tenantId, siteId,
+        var plan = await schedules.CreateAutomaticPlanAsync(new CreateCollectionScheduleCommand(tenantId, siteId,
             PromptMonitoringIdentity.ScheduleName, "daily", null, "09:00", "UTC",
             new CollectionScheduleSelection([allPrompt], [chatgpt], 1), Enabled: true));
         try

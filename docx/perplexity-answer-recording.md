@@ -17,7 +17,7 @@
 | Check 结果 | `GET /api/v1/visibility-checks/{checkId}` |
 | 监控记录 | `GET /api/v1/sites/{siteId}/monitoring/records?engine=perplexity` 及同快照详情 |
 
-手动运行不扣项目积分，但每个成功的 Check 消耗 Cloro 额度（Perplexity 标价 4；失败任务本次实测扣 0）。viewer 不能创建运行。
+手动运行自 2026-11-27 起与每日监控同价预占项目积分（检测数 × 10），余额不足返回 402 `CREDIT_INSUFFICIENT` 且不创建运行（Trellis `11-27-sec-manual-run-charging`，代码已实现，本机 API / Worker 尚未用该构建重启；见[品牌监控配置说明](brand-monitoring-config.md) §4、§9）；在此之前手动运行不扣项目积分，本文的实测属于这一时期。每个成功的 Check 另外消耗 Cloro 额度（Perplexity 标价 4；失败任务本次实测扣 0）。viewer 不能创建运行。
 
 ## 3. 字段处理
 

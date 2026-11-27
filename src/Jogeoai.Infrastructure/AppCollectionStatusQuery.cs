@@ -59,15 +59,25 @@ public sealed class AppCollectionStatusQuery(MySqlDatabase database, IOptions<Ap
                 """, ct)).Select(row => row[0]).ToHashSet(StringComparer.Ordinal);
 
         // The two cycles of each target, as local start dates.
+        // Without an App plan (monitoring never started) there is no cycle yet, whatever the anchor says.
         var cycles = targets.Select(target =>
         {
-            var current = AppCycleCalendar.CurrentCycleStart(target.Anchor, nowUtc, zone);
+            var current = plan is null ? null : AppCycleCalendar.CurrentCycleStart(target.Anchor, nowUtc, zone);
             DateOnly? last = current is { } start && target.Anchor is { } anchor && start.AddDays(-AppCycleRules.CycleDays) >= anchor
                 ? start.AddDays(-AppCycleRules.CycleDays) : null;
             return (Target: target, Current: current, Last: last);
         }).ToArray();
         var keys = cycles.SelectMany(cycle => new[] { cycle.Current, cycle.Last }).OfType<DateOnly>()
             .Select(AppCycleCalendar.SlotKey).Distinct(StringComparer.Ordinal).ToArray();
+        // Instant slots (11-27-app-first-cycle-now) of the last two cycles: their runs belong to the cycle that ends at their
+        // per-platform deadline, i.e. the cycle starting 7 days before it.
+        var instantKeys = plan is null ? [] : (await QueryRowsAsync(c, t, $"""
+                SELECT local_slot_key FROM schedule_slots
+                WHERE schedule_id = UUID_TO_BIN(@schedule) AND created_at >= @since AND local_slot_key NOT LIKE '%T{PromptMonitoringIdentity.AppLocalTime.Replace(":", "", StringComparison.Ordinal)}'
+                ORDER BY local_slot_key;
+                """, ct, ("@schedule", plan[0]), ("@since", nowUtc.UtcDateTime.AddDays(-3 * AppCycleRules.CycleDays))))
+            .Select(row => row[0]).Where(AppCycleRules.IsInstantSlotKey).ToArray();
+        keys = [.. keys, .. instantKeys.Where(key => !keys.Contains(key, StringComparer.Ordinal))];
 
         var slots = new Dictionary<string, (string Status, string? SkipCode)>(StringComparer.Ordinal);
         var runs = new Dictionary<string, RunRecord>(StringComparer.Ordinal);
@@ -129,14 +139,49 @@ public sealed class AppCollectionStatusQuery(MySqlDatabase database, IOptions<Ap
             return AppMonitoringEstimate.Excluded(prompts.Prompts, [engine]);
         }
 
-        async Task<AppCollectionCycleStatus> CycleAsync(DateOnly start, string engine)
+        // Instant cycle start of an instant run for one target: 7 days before its deadline (the target's next regular slot).
+        // An instant run freezes every App target of the plan but only has checks for its uncovered pairs: it counts for a
+        // target only when it has checks on that platform.
+        DateOnly? InstantStart(string key, AutomaticMonitoringSelection.Target target)
         {
+            if (!runs.TryGetValue(key, out var run) || !counts.ContainsKey((run.Id, target.Value.Engine))) return null;
+            var deadline = AppCycleRules.InstantDeadlineUtc(AutomaticMonitoringSelection.SlotLocalDate(key), target.Anchor, zone);
+            return DateOnly.FromDateTime(TimeZoneInfo.ConvertTime(deadline, zone).DateTime).AddDays(-AppCycleRules.CycleDays);
+        }
+        // An instant run that has started makes its cycle the current one (it may start before that cycle's 09:11).
+        cycles = cycles.Select(cycle =>
+        {
+            var started = instantKeys.Where(key => AppCycleRules.NominalUtc(key, zone) <= nowUtc)
+                .Select(key => InstantStart(key, cycle.Target)).OfType<DateOnly>().DefaultIfEmpty().Max();
+            if (started == default || cycle.Current is { } current && current >= started) return cycle;
+            return (Target: cycle.Target, Current: (DateOnly?)started, Last: cycle.Current ?? cycle.Last);
+        }).ToArray();
+
+        async Task<AppCollectionCycleStatus> CycleAsync(DateOnly start, AutomaticMonitoringSelection.Target target)
+        {
+            var engine = target.Value.Engine;
             var key = AppCycleCalendar.SlotKey(start);
             var skip = slots.TryGetValue(key, out var slot) && slot.Status == "skipped" ? slot.SkipCode : null;
             var (startsAt, endsAt) = (AppCycleCalendar.SlotUtc(start, zone), AppCycleCalendar.SlotUtc(start.AddDays(AppCycleRules.CycleDays), zone));
-            if (!runs.TryGetValue(key, out var run) || !run.Engines.Contains(engine))
+            var cycleRuns = new List<RunRecord>();
+            var hasRegular = runs.TryGetValue(key, out var regular) && regular.Engines.Contains(engine);
+            if (hasRegular) cycleRuns.Add(regular!);
+            // Without a regular run the cycle starts at its first instant run (an instant cycle can be shorter than 7 days when
+            // the platform's next regular slot is close, e.g. an anchor in the future).
+            DateTimeOffset? firstInstant = null;
+            foreach (var instantKey in instantKeys.Where(candidate => InstantStart(candidate, target) == start))
+            {
+                cycleRuns.Add(runs[instantKey]);
+                var instantAt = AppCycleRules.NominalUtc(instantKey, zone);
+                if (firstInstant is null || instantAt < firstInstant) firstInstant = instantAt;
+            }
+            if (firstInstant is { } at && (!hasRegular || at < startsAt)) startsAt = at;
+            if (cycleRuns.Count == 0)
                 return new AppCollectionCycleStatus(startsAt, endsAt, false, skip, 0, 0, 0, 0, [], await LiveExcludedAsync(engine));
-            var rows = counts.GetValueOrDefault((run.Id, engine), []);
+            // The regular run's skip code does not describe a cycle that an instant run collected.
+            if (!hasRegular) skip = null;
+            var run = cycleRuns[0];
+            var rows = cycleRuns.SelectMany(item => counts.GetValueOrDefault((item.Id, engine), [])).ToList();
             int Sum(Func<(string Status, string ErrorCode, int Count), bool> predicate) => rows.Where(predicate).Sum(row => row.Count);
             var notCollected = rows.Where(row => row.Status == "cancelled")
                 .GroupBy(row => row.ErrorCode, StringComparer.Ordinal).OrderBy(group => group.Key, StringComparer.Ordinal)
@@ -149,8 +194,8 @@ public sealed class AppCollectionStatusQuery(MySqlDatabase database, IOptions<Ap
         foreach (var (target, currentStart, lastStart) in cycles)
         {
             var engine = target.Value.Engine;
-            var current = currentStart is { } a ? await CycleAsync(a, engine) : null;
-            var last = lastStart is { } b ? await CycleAsync(b, engine) : null;
+            var current = currentStart is { } a ? await CycleAsync(a, target) : null;
+            var last = lastStart is { } b ? await CycleAsync(b, target) : null;
             // First result: none yet since the target was (last) enabled, and the plan is running.
             var hasResult = latestResult.TryGetValue(engine, out var latest)
                 && (target.EnabledAt is not { } enabledAt || latest >= enabledAt);

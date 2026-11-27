@@ -2,6 +2,66 @@
 
 本文按日期保留证据，顶部为最近核对；历史进程、配置、库清单和测试结果不能外推为当前状态。功能合同仍在 [README](../README.md) 和各模块说明。
 
+## 2026-11-27 安全修复的本机验证
+
+记录时间：2026-11-27 约 22:10（Asia/Taipei）。范围是当天六个安全子任务（受信转发头、采集接口鉴权前开销、知识库摄取重领上限与解析预算、品牌研究额度与公平领取、手动采集与采集计划计费、App 绑定审批与节点设备上限）的隔离库测试、迁移 052 和本机运行态核对；不是全项目功能验收或发布。
+
+### 迁移 052 与本机 `jogeoai`
+
+- 执行前备份：`.backups/jogeoai-db-pre-052-20261127-220615.sql.gz`（58.6 MB，权限 600）。
+- 2026-11-27 用应用账号（不是 root）在本机开发库 `jogeoai` 执行 052。结果：`collector_app_bindings.approved_at`、`collector_app_nodes.max_devices` 两列和 CHECK 都存在；1 个节点 `max_devices = 4`；原有 12 条绑定仍是 `active`，全部已批准（`approved_at = created_at`），待批准 0 条；没有残留的存储过程。
+- 052 另在下面六个隔离测试库用 root 执行（随 001–052）。迁移用例 `Migration052ApprovesExistingBindingsSizesEachNodesCapIsReplayableAndRollsBack`（回填、重放、回滚）用应用账号通过。
+- 没有在其他库执行过（目前没有生产库）。
+
+### 进程与健康
+
+- 旧的 API（5260）和 Worker 进程已停止，两者于 2026-11-27 22:07 用新构建重启：`./scripts/run-local.sh api`、`./scripts/run-local.sh worker`，Development 环境，各在一个终端页签里运行。
+- `/health/live`、`/health/ready` 均为 200。
+- API 启动日志：受信转发头未启用（本机没有配置）；有一行 Information 级别的 `Collector rate limit inactive`，符合 Development 下的设计。
+- Worker 重启后运行一分多钟，日志没有错误；摄取、产品识别和品牌研究循环按新的领取语句轮询。这不证明这些循环处理过真实任务。
+
+### 在 5260 上做过的 HTTP 核对
+
+- 匿名 `GET /api/v1/auth/me`：401。
+- `/internal/collector/app/leases` 不带令牌：合法 JSON、损坏的 JSON、1.1 MB 请求体都返回 401（改动前损坏的 JSON 会先得到 400）；错误令牌加损坏的 JSON：401。
+- `/internal/collector/leases` 不带令牌：401。`GET /internal/collector/health`：200。`/mcp` 不带令牌：401。
+- 带本机配置的网页采集令牌：损坏的 JSON 返回 400（鉴权通过，绑定失败）；向 16 KiB 上限的接口发送 1.1 MB 请求体返回 413。
+- 经 Development 的 `X-Tenant-Id` 兼容桥读取的租户只读接口（`prompt-monitoring`、`collection-schedules`、`visibility-runs`、`targets`、`app-collection/status`、知识库资料列表）：200。
+- 管理端 `collector-app` 接口没有会话：401。
+
+### 测试
+
+| 范围 | 结果 |
+|---|---|
+| 六个子任务涉及的 33 个不连库测试类，合并运行 3 次 | 每次 845 通过、0 失败。合并运行发现调用方取消时被放弃的 PDF 解析没有被取消，`KnowledgeAdapters.cs` 已改为显式取消，结果是修复之后的 |
+| 知识库重领上限：`KnowledgeStoreSqlTests`、`KnowledgeProductStoreSqlTests` | 6 通过、0 失败（含 4 个新的重领上限用例） |
+| 计费：`ManualRunChargingSqlTests`、`CollectionScheduleSqlTests`、`InstantCollectionSqlTests`、`AnswerModeSqlTests` | 合计 22 通过（首次运行 19 通过、1 跳过；跳过的用例随后接上提问范围测试库运行，所在测试类 3/3 通过）。由 MySQL 按 `utf8mb4_0900_ai_ci` 做的保留名称比较已运行并通过 |
+| `PromptImportSqlTests` | 9 通过 |
+| `GeminiAnswerPersistenceSqlTests` | 没有运行：只接受 33318 端口的专用实例，本机没有 |
+| 品牌研究：`BrandResearchQuotaSqlTests`、`BrandResearchStoreTests` | 8 通过、1 跳过。7 个新的额度用例全部通过（同一品牌并发在 READ COMMITTED 下只插入一条任务、滚动 24 小时上限、领取顺序、新团队不插队）。跳过的是既有用例 `BrandResearchStoreTests.PersistsContext…`，需要带有既有租户数据的专用库 `jogeoai_registration_20260929`，它调整后的断言仍未运行 |
+| 品牌研究领取语句的 `EXPLAIN`（本机开发库，79 个任务、2 个团队） | 外层表使用 `ix_brand_research_jobs_claim`（range，约 2 行，filesort）；依赖子查询按 `tenant_id` 前缀做 `ref` 查找（每个团队约 20 行）。按当前数据量不需要补索引 |
+| App 渠道：全部 `App*` 测试类加 `CollectorSessionPoolSqlTests`（457 项） | 首次运行 456 通过、1 失败；失败的是 `AppChannelMigrationTests.NewTablesCarryTheAgreedDefaultsAndConstraints` 里一处原有的、依赖执行顺序的断言（期望绑定间隔是 049 的默认值 300 秒，迁移 050 把它改成 100 秒，表上是哪个值取决于回滚重放用例是否先运行）。断言改为两个值都接受，并在测试库重新执行 050 之后，完整运行 457 通过、0 失败、0 跳过 |
+
+### 数据库清单
+
+- 当天本机 Compose MySQL 8.4 的非系统库：`jogeoai`，三个此前已有的测试库，六个新建的隔离测试库。
+- 六个新建的隔离测试库（都已执行 001–052；**已在同日经用户确认后逐个删除**，名字带 `sec1127` 的五条库级授权同时收回，`jogeoai_stage1_20260926` 的授权保留；删除后本机非系统库为 `jogeoai` 与三个更早的测试库）：`jogeoai_stage1_20260926`、`jogeoai_knowledge_sec1127_test`、`jogeoai_answer_mode_sec1127`、`jogeoai_prompt_scope_sec1127`、`jogeoai_app_sec1127_test`、`jogeoai_pool_sec1127_test`。
+- 三个此前已有、仍然存在的测试库（2026-11-12 一节已列出）：`jogeoai_prompt_scope_20261111`、`jogeoai_repcheck_20261030a`、`jogeoai_subscription_20261019`。
+- 2026-11-12 一节列出的 `jogeoai_registration_20260929` 当天**不在**库清单里。
+
+### 没有验证的
+
+- `max-devices` 接口的成功写入、非管理员会话访问管理接口的 403。（管理端的读取与反例已在同日稍后用临时系统管理员会话验证，会话行用后已删除：节点列表 `maxDevices = 4`；12 条绑定全部 `active`、`approvalPending = false`、`approvedAt` 有值；告警含 `pendingApprovalBindings`（0 条）；`max-devices` 的越界返回 400、低于已登记设备数返回 409、无会话返回 401。）
+- 用真实节点令牌走 App 采集接口的 413。
+- 429 限流（本机按设计不生效）。
+- 手动采集和自建计划时隙的积分预占与结算。
+- 品牌研究的 409 / 429。
+- 真实采集端遇到待批准绑定、`device_limit_exceeded`、413、429 时的表现。
+- 真实网关和受信转发头。
+- 真实 PDF 下的解析上限（本机没有 PDF 资料）。
+- 生产环境。
+- 仍未完成的工作：品牌研究的两处前端改动（等取消返回后再提交；收到 409 时接管 `details.jobId`）；前端类型没有重新生成；来源校验（CSRF）和生产启动断言；内容图片额度；审计中优先级较低的事项。
+
 ## 2026-11-12 文档同步与只读核对
 
 核对时间：2026-11-12 11:38–11:44（Asia/Taipei）。按用户「直接同步」，未创建 Trellis 任务。范围为当前后端的入口文档、规则、近期引导 / 提问 / 监控变更及本机服务；不是全项目功能验收或发布。

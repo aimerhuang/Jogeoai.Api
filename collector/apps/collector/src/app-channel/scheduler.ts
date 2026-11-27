@@ -238,6 +238,8 @@ export async function runBatch(options: BatchOptions): Promise<BatchResult> {
         binding,
         questionText,
         signal: attemptAbort.signal,
+        // A stop request at once, so that what can be cut short ends before the grace period.
+        stopping: options.stop,
         onSent: sent,
       });
       inFlight.delete(key);

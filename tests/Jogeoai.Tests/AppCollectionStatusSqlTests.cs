@@ -154,12 +154,12 @@ public sealed class AppCollectionStatusSqlTests
         var status = new AppCollectionStatusQuery(rig.Database, AppSiteTargetsSqlTests.OpenFor(rig.Tenant));
         var plain = await SeedBrandAsync(cs, rig.Tenant, "没有 App 目标", follows: false, locale: "zh-CN", created: "2026-07-06");
         Assert.Equal((false, 0), ((await status.GetAsync(rig.Tenant, plain)).PlanActive, (await status.GetAsync(rig.Tenant, plain)).Targets.Count));
-        // App targets saved, monitoring never started: no App plan, the anchor is tomorrow, nothing is expected yet.
+        // App targets saved, monitoring never started: no App plan, so no cycle and nothing expected; the anchor is the enabling day.
         var site = await SeedAppBrandAsync(rig, "未开启监控", "qwen");
         var view = await status.GetAsync(rig.Tenant, site);
         var target = Assert.Single(view.Targets);
         Assert.False(view.PlanActive);
         Assert.Equal(("qwen", (AppCollectionCycleStatus?)null, (DateTimeOffset?)null), (target.Engine, target.CurrentCycle, target.ExpectedFirstResultAt));
-        Assert.Equal(ManagementStore.BrandLocalDate("Asia/Shanghai", DateTimeOffset.UtcNow).AddDays(1), target.FrequencyAnchor);
+        Assert.Equal(ManagementStore.BrandLocalDate("Asia/Shanghai", DateTimeOffset.UtcNow), target.FrequencyAnchor);
     });
 }

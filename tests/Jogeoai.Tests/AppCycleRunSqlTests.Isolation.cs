@@ -146,7 +146,7 @@ public sealed partial class AppCycleRunSqlTests
 
         // The pass of one worker (the open tenant is the only one in its Collector:AppTenantIds).
         Assert.Equal(3, await open.Schedules.MaterializeDueSlotsAsync(Utc(3, 3, 0), 10));
-        var slots = (await open.Schedules.GetPendingSlotsAsync(100))
+        var slots = ((await open.Schedules.GetPendingSlotsAsync(100)).Regular())
             .Where(slot => slot.ScheduleId == both.Main || slot.ScheduleId == both.App || slot.ScheduleId == apiOnly.Main).ToArray();
         Assert.Equal(3, slots.Length);
         foreach (var slot in slots) Assert.True(await open.Schedules.ProcessSlotAsync(slot, open.Runs));

@@ -36,6 +36,19 @@ public sealed class ManagementController(IManagementStore store, TenantContextRe
         }
     }
 
+    // After a committed prompt write: prompt × App platform pairs the current App cycle does not cover yet are queued at once
+    // (11-27-app-first-cycle-now). Best effort like the instant collection; the response never depends on it.
+    private async Task SyncAppPlan(Guid tenantId, Guid siteId, CancellationToken cancellationToken)
+    {
+        if (monitoring is null) return;
+        try { await monitoring.SyncAppPlanAsync(tenantId, siteId, cancellationToken); }
+        catch (Exception exception) when (!(exception is OperationCanceledException && cancellationToken.IsCancellationRequested))
+        {
+            logger?.LogWarning(InstantCollectionFailedEvent, exception, "AppPlanSyncFailed site={SiteId} error={ErrorType}",
+                siteId, exception.GetType().Name);
+        }
+    }
+
     // 写入前的租户解析与可写角色校验；规则见 TenantWriteAccess，必须在任何 Store 调用之前执行。
     private Guid TenantForWrite(string message = "当前角色无权修改提问。")
     {
@@ -176,6 +189,7 @@ public sealed class ManagementController(IManagementStore store, TenantContextRe
     /// <summary>
     /// 创建追踪 Prompt。新建为启用状态时，立即对该提问 × 它的有效模型采集一轮（不看采集频率，每次检测 10 积分，当天已采集的组合不重复采集），
     /// 结果在响应的 instantCollection 中返回；余额不足、采集服务不可用等原因未立即采集时同样返回 201，原因见 instantCollection。
+    /// 提问保存后，当前 App 周期尚未覆盖的「提问 × App 平台」会立即进入一个即时时隙，由 Worker 建采集任务（仅限已开放 App 渠道的团队）。
     /// </summary>
     [HttpPost("sites/{siteId:guid}/prompts")]
     [ProducesResponseType(typeof(PromptView), StatusCodes.Status201Created)]
@@ -190,6 +204,7 @@ public sealed class ManagementController(IManagementStore store, TenantContextRe
                     InstantCollection = await CollectInstantly(siteId,
                         service => service.CollectNewPromptsAsync(tenantId, siteId, [created.PromptId], cancellationToken), cancellationToken),
                 };
+            await SyncAppPlan(tenantId, siteId, cancellationToken);
             return StatusCode(201, created);
         });
 
@@ -206,6 +221,7 @@ public sealed class ManagementController(IManagementStore store, TenantContextRe
     /// <summary>
     /// 编辑、启停或归档 Prompt；内容、标签或分类变化产生新版本。请求修改平台范围（targetKeys 或 resetTargetScope=true）且保存后新增了有效模型时，
     /// 立即对该提问 × 新增模型补采一次（只减少模型不采集），结果在响应的 instantCollection 中返回；未立即采集不影响保存结果。
+    /// 提问保存后，当前 App 周期尚未覆盖的「提问 × App 平台」会立即进入一个即时时隙，由 Worker 建采集任务（仅限已开放 App 渠道的团队）。
     /// </summary>
     [HttpPatch("sites/{siteId:guid}/prompts/{promptId:guid}")]
     [ProducesResponseType(typeof(PromptView), StatusCodes.Status200OK)]
@@ -225,6 +241,7 @@ public sealed class ManagementController(IManagementStore store, TenantContextRe
                     InstantCollection = await CollectInstantly(siteId,
                         service => service.CollectAddedTargetsAsync(tenantId, siteId, before, after, cancellationToken), cancellationToken),
                 };
+            await SyncAppPlan(tenantId, siteId, cancellationToken);
             return Ok(after);
         });
 
@@ -237,6 +254,7 @@ public sealed class ManagementController(IManagementStore store, TenantContextRe
     /// <summary>
     /// 按幂等键（Idempotency-Key 请求头）提交 Prompt 批量导入；行可带分组、品牌词分类与来源。实际新建了提问（createdPromptIds 非空）时，
     /// 立即对新提问 × 各自的有效模型采集一轮，结果在响应的 instantCollection 中返回；同一幂等键重放不会产生第二轮立即采集。
+    /// 提问保存后，当前 App 周期尚未覆盖的「提问 × App 平台」会立即进入一个即时时隙，由 Worker 建采集任务（仅限已开放 App 渠道的团队）。
     /// </summary>
     [HttpPost("sites/{siteId:guid}/prompts/import")]
     [ProducesResponseType(typeof(PromptImportResult), StatusCodes.Status200OK)]
@@ -255,6 +273,7 @@ public sealed class ManagementController(IManagementStore store, TenantContextRe
     /// 400 MONITORING_TOO_LARGE；平台无效返回 400 PROMPT_TARGET_INVALID；未执行迁移 042 返回 503 PROMPT_TARGET_SCHEMA_NOT_MIGRATED。
     /// 创建成功后立即对实际新建的提问（createdPromptIds）× 各自的有效模型采集一轮（不看采集频率，每次检测 10 积分），结果在响应的 instantCollection 中返回；
     /// 余额不足或采集服务不可用时提问照常创建，原因见 instantCollection。同一幂等键重放不会产生第二轮立即采集。
+    /// 提问保存后，当前 App 周期尚未覆盖的「提问 × App 平台」会立即进入一个即时时隙，由 Worker 建采集任务（仅限已开放 App 渠道的团队）。
     /// </summary>
     [HttpPost("sites/{siteId:guid}/prompts/batch")]
     [ProducesResponseType(typeof(PromptImportResult), StatusCodes.Status200OK)]
@@ -271,13 +290,16 @@ public sealed class ManagementController(IManagementStore store, TenantContextRe
     // so no second run is created, while a first request interrupted before its run still gets the instant collection.
     private async Task<PromptImportResult> WithInstantCollection(Guid tenantId, Guid siteId, PromptImportResult result,
         CancellationToken cancellationToken)
-        => result.CreatedPromptIds is { Count: > 0 } created
-            ? result with
-            {
-                InstantCollection = await CollectInstantly(siteId,
-                    service => service.CollectNewPromptsAsync(tenantId, siteId, created, cancellationToken), cancellationToken),
-            }
-            : result;
+    {
+        if (result.CreatedPromptIds is not { Count: > 0 } created) return result;
+        result = result with
+        {
+            InstantCollection = await CollectInstantly(siteId,
+                service => service.CollectNewPromptsAsync(tenantId, siteId, created, cancellationToken), cancellationToken),
+        };
+        await SyncAppPlan(tenantId, siteId, cancellationToken);
+        return result;
+    }
 
     /// <summary>
     /// 查询 Provider 采集目标目录和能力（含每个 Provider 支持的回答模式 supportedAnswerModes 与默认模式 defaultAnswerMode）。

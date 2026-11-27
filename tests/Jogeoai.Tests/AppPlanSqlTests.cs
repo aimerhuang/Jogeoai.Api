@@ -136,7 +136,14 @@ public sealed partial class AppPlanSqlTests
         => CollectionScheduleCalendar.NextAfter("daily", null, CollectionScheduleCalendar.ParseLocalTime(PromptMonitoringIdentity.AppLocalTime),
             CollectionScheduleCalendar.ParseTimeZone(zone), DateTimeOffset.UtcNow).UtcDateTime.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture);
 
-    // A brand with only App targets: POST creates the App plan and nothing else.
+    // The single slot of the brand's plans: key | status | frozen selection.
+    private static async Task<string?[]> InstantSlotsAsync(string cs, Guid site)
+        => Assert.Single(await RowsAsync(cs, """
+            SELECT s.local_slot_key, s.status, CAST(s.selection_snapshot AS CHAR) FROM schedule_slots s
+            JOIN collection_schedules p ON p.id = s.schedule_id WHERE p.site_id = UUID_TO_BIN(@site);
+            """, ("@site", site.ToString())));
+
+    // A brand with only App targets: POST creates the App plan and its instant slot, and nothing else.
     [AppChannelMySqlFact]
     public Task AnAppOnlyBrandStartsWithTheAppPlanAloneWithoutBaselineMainPlanRunOrReservation()
         => AppSiteTargetsSqlTests.IsolatedAsync(async (cs, seedTenant) =>
@@ -167,8 +174,11 @@ public sealed partial class AppPlanSqlTests
         // No baseline target, no run, no check, no provider or collector task, no reservation, no ledger entry.
         Assert.Equal(["app_collector:doubao", "app_collector:kimi"], await EnabledTargetsAsync(cs, site));
         Assert.Equal(2, await CountAsync(cs, "SELECT COUNT(*) FROM site_targets WHERE site_id = UUID_TO_BIN(@site);", ("@site", site.ToString())));
-        Assert.Equal(0, await CountAsync(cs, "SELECT COUNT(*) FROM schedule_slots s JOIN collection_schedules p ON p.id = s.schedule_id WHERE p.site_id = UUID_TO_BIN(@site);",
-            ("@site", site.ToString())));
+        // 11-27-app-first-cycle-now: starting inserts one pending instant slot (the current local minute, never 09:11) with the
+        // plan snapshot; the Worker expands it, so starting itself still writes no run, check, task or reservation.
+        var instantSlot = await InstantSlotsAsync(cs, site);
+        Assert.Equal((AppCycleRules.IsInstantSlotKey(instantSlot[0]), "pending"), (true, instantSlot[1]));
+        AssertSameJson(plan.Snapshot, instantSlot[2]);
         Assert.Equal(NoCollection, await CollectionFootprintAsync(cs, rig.Tenant));
 
         // Idempotent: POST and GET again leave the same row (id, version, snapshot, next slot, updated_at).
@@ -189,6 +199,8 @@ public sealed partial class AppPlanSqlTests
         AssertSameJson(Snapshot([.. prompts, created.PromptId], [AppTarget("doubao"), AppTarget("kimi")]), after.Snapshot);
         Assert.Equal(["app_collector:doubao", "app_collector:kimi"], await EnabledTargetsAsync(cs, site));
         Assert.Equal(NoCollection, await CollectionFootprintAsync(cs, rig.Tenant));
+        // The instant slot is still pending, so no second one was inserted.
+        Assert.Equal(instantSlot, await InstantSlotsAsync(cs, site));
 
         // Both estimates accept the App-only configuration; every API figure is zero.
         var estimate = await rig.Service.EstimateTargetsAsync(rig.Tenant, site, new MonitoringTargetsEstimateRequest([App("doubao"), App("kimi")]));

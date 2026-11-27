@@ -39,8 +39,11 @@ public sealed class PromptMonitoringTests
     }
 
     [Fact]
-    public void ManualCloroRunDoesNotOptIntoPromptMonitoringBilling()
+    public void RunCommandDefaultIsUnchargedSoEveryEntryPointOptsInExplicitly()
     {
+        // The record default is kept for existing internal callers; the manual-run controller, every schedule slot, the
+        // initial run and the instant collection all pass ChargeMonitoringCredits: true (VisibilityRunPermissionTests,
+        // CollectionScheduleTests).
         var command = new CreateCloroVisibilityRunCommand(Guid.NewGuid(), Guid.NewGuid(),
             [Guid.NewGuid()], [new CloroVisibilityTarget("cloro", "copilot")], "manual-run-key");
 

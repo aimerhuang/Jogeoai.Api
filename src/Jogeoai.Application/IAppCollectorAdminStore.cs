@@ -6,7 +6,8 @@ namespace Jogeoai.Application;
 /// App 全局账号池的运营读写（implement 8.3，/api/v1/admin/collector-app/）。只供系统管理员接口调用，授权在 Controller 里完成。
 /// 写操作沿用账号池的加锁顺序（绑定 → 平台 → 任务；这里的写操作都不锁任务）、READ COMMITTED 与死锁重试，
 /// 每次实际发生变化都在同一事务里向 collector_app_events 追加一条事件（actor 为 operator:&lt;用户&gt;）；没有变化时不写事件。
-/// 节点登记、令牌签发与轮换、节点启停、绑定恢复和平台恢复在 <see cref="IAppCollectorPoolStore"/> 上。迁移 049 未部署时返回 503 APP_CHANNEL_SCHEMA_NOT_MIGRATED。
+/// 节点登记、令牌签发与轮换、节点启停、绑定恢复和平台恢复在 <see cref="IAppCollectorPoolStore"/> 上。迁移 049 未部署时返回 503 APP_CHANNEL_SCHEMA_NOT_MIGRATED；
+/// 节点与绑定的读取、绑定的停用、节点设备上限的设置还需要迁移 052，未部署时同样返回 503，不做任何写入。
 /// </summary>
 public interface IAppCollectorAdminStore
 {
@@ -18,6 +19,18 @@ public interface IAppCollectorAdminStore
     /// <param name="nodeId">节点标识。</param>
     /// <param name="cancellationToken">取消令牌。</param>
     Task<AppNodeView> GetNodeAsync(string nodeId, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// 设置节点可登记的不同设备数上限（迁移 052）。取值必须在 1–64 之间，否则返回 400 INVALID_APP_LIMITS；
+    /// 低于该节点已登记的不同设备数时返回 409 APP_NODE_MAX_DEVICES_BELOW_REGISTERED，不做修改（不允许出现“已登记但超限”）。
+    /// 与现值相同时返回 false，不写事件。节点不存在时返回 404 APP_NODE_NOT_FOUND。
+    /// 与绑定上报用同一把节点行锁，调低上限和同时到达的上报不会互相越过。
+    /// </summary>
+    /// <param name="nodeId">节点标识。</param>
+    /// <param name="maxDevices">新的设备上限（1–64）。</param>
+    /// <param name="operatorUserId">执行操作的运营人员，写入审计事件。</param>
+    /// <param name="cancellationToken">取消令牌。</param>
+    Task<bool> SetNodeMaxDevicesAsync(string nodeId, int maxDevices, Guid? operatorUserId, CancellationToken cancellationToken = default);
 
     /// <summary>列出绑定（按平台、节点、设备排序）；为空的条件不筛选。</summary>
     /// <param name="nodeId">只看该节点的绑定。</param>
@@ -35,7 +48,8 @@ public interface IAppCollectorAdminStore
     /// <summary>
     /// 运营停用绑定：状态 stopped、原因 disabled_by_operator（覆盖原来的停止原因，原来的原因记在事件里；已停止的保留原来的停止时间）。
     /// 之后采集器上报 ok 或任何停止原因都不会解除它，只能由运营恢复。正在执行的租约不收回。已是运营停用时返回 false，不写事件。
-    /// 绑定不存在时返回 404 APP_BINDING_NOT_FOUND。
+    /// 绑定不存在时返回 404 APP_BINDING_NOT_FOUND。待批准的绑定本来就是这个状态和原因，返回 false；
+    /// 状态是 active 但从未批准的绑定（旧版本在迁移 052 之后登记的）在这里变为待批准。迁移 052 未部署时返回 503，不做修改。
     /// </summary>
     /// <param name="bindingId">绑定标识。</param>
     /// <param name="operatorUserId">执行操作的运营人员，写入审计事件。</param>
@@ -133,8 +147,8 @@ public interface IAppAlertQuery
 {
     /// <summary>
     /// 读取当前的告警信息：失联节点、停止的绑定、暂停或不可用的平台、过去 24 小时的未采集数与领取 / 成功 / 失败次数、各平台本周的容量占用、
-    /// 最近连续在发题前失败的绑定（只提示，不改变任何状态）。
-    /// 迁移 049 未部署时返回 503 APP_CHANNEL_SCHEMA_NOT_MIGRATED。
+    /// 最近连续在发题前失败的绑定（只提示，不改变任何状态）、待运营批准的绑定（不计入停止的绑定）。
+    /// 迁移 049 未部署时返回 503 APP_CHANNEL_SCHEMA_NOT_MIGRATED；迁移 052 未部署时照常返回，待批准的绑定为空数组。
     /// </summary>
     /// <param name="cancellationToken">取消令牌。</param>
     Task<AppAlertsView> GetAlertsAsync(CancellationToken cancellationToken = default);

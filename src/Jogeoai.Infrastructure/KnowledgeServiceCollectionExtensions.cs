@@ -1,6 +1,7 @@
 using Jogeoai.Application;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Options;
 
 namespace Jogeoai.Infrastructure;
 
@@ -20,7 +21,14 @@ public static class KnowledgeServiceCollectionExtensions
         else
             services.AddSingleton<IObjectStorage, LocalObjectStorage>();
 
-        services.AddSingleton<IDocumentTextExtractor, BasicDocumentTextExtractor>();
+        // 解析资源预算（页数、字符、图片像素、墙钟超时）：都有默认值；配置超出允许范围时启动失败，不静默修正。
+        services.AddOptions<KnowledgeExtractionLimits>()
+            .Bind(configuration.GetSection(KnowledgeExtractionLimits.SectionName))
+            .Validate(options => options.IsValid(),
+                "Knowledge:Extraction requires MaxPdfPages 1-100000, MaxCharacters 1-100000000, MaxImagePixels 1-1000000000 and ParseTimeoutSeconds 1-3600.")
+            .ValidateOnStart();
+        services.AddSingleton<IDocumentTextExtractor>(provider =>
+            new BasicDocumentTextExtractor(provider.GetRequiredService<IOptions<KnowledgeExtractionLimits>>().Value));
         services.AddHttpClient<OpenAiCompatibleEmbeddingProvider>(client =>
             client.Timeout = Timeout.InfiniteTimeSpan);
         services.AddHttpClient<QdrantVectorIndex>(client =>

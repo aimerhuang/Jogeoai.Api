@@ -10,6 +10,17 @@ using Microsoft.AspNetCore.Mvc;
 namespace Jogeoai.Api.Controllers;
 
 /// <summary>创建和查询可见性运行。</summary>
+/// <param name="store">国内网页采集通道（platforms 形态）的运行存储。</param>
+/// <param name="cloroStore">API 回答 Provider 运行存储。</param>
+/// <param name="cloroSettingsStore">Cloro 全局配置。</param>
+/// <param name="cloroKeyPool">Cloro key 池。</param>
+/// <param name="providerSettings">API 回答 Provider 设置。</param>
+/// <param name="managementStore">品牌、提问与站点目标。</param>
+/// <param name="runQueryStore">运行查询与幂等重放。</param>
+/// <param name="tenantContext">租户解析。</param>
+/// <param name="appStore">App 周期运行查询。</param>
+/// <param name="environment">宿主环境；非 Development 环境下 platforms 形态只允许系统管理员发起。</param>
+/// <param name="adminStore">系统管理员校验。</param>
 [ApiController]
 [Route("api/v1/visibility-runs")]
 public sealed class VisibilityRunsController(
@@ -21,27 +32,47 @@ public sealed class VisibilityRunsController(
     IManagementStore managementStore,
     IVisibilityRunQueryStore runQueryStore,
     TenantContextResolver tenantContext,
-    IAppCollectionStore appStore) : ControllerBase
+    IAppCollectionStore appStore,
+    IHostEnvironment environment,
+    IResearchStore adminStore) : ControllerBase
 {
-    /// <summary>由有写权限的成员创建一次国内 Collector 或 Cloro 可见性运行。</summary>
+    /// <summary>没有会话用户（Development 的 X-Tenant-Id 兼容桥）时写入运行的发起人标识。</summary>
+    public const string DevBridgeRequestedBy = "dev-bridge";
+
+    /// <summary>
+    /// 由有写权限的成员创建一次可见性运行。<c>previewId</c> / <c>targetIds</c> / <c>tagIds</c> 与 <c>targets</c> 两种形态走 API 回答 Provider，
+    /// 按每日监控同价预占积分（检测数 × 10），余额不足返回 402 <c>CREDIT_INSUFFICIENT</c> 且不创建运行；同一 Idempotency-Key 重放不重复预占。
+    /// <c>platforms</c> 形态走国内网页采集通道，不计费：非 Development 环境只允许系统管理员发起（否则 403 <c>ADMIN_REQUIRED</c>），
+    /// 最多 200 个 Prompt、20 个平台入口（超出返回 400 <c>INVALID_RUN</c>）。运行的发起人标识由服务端写入，请求中的 requestedBy 不被存储。
+    /// </summary>
     /// <param name="request">站点、Prompt 和平台入口。</param>
     /// <param name="cancellationToken">取消令牌。</param>
     [HttpPost]
     [ProducesResponseType(typeof(VisibilityRunCreated), StatusCodes.Status202Accepted)]
+    [ProducesResponseType(StatusCodes.Status400BadRequest)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType(StatusCodes.Status402PaymentRequired)]
     [ProducesResponseType(StatusCodes.Status403Forbidden)]
     public async Task<ActionResult<VisibilityRunCreated>> Create(
         [FromBody] CreateVisibilityRunRequest request,
         CancellationToken cancellationToken)
     {
         if (!TryTenant(out var tenantId, out var tenantFailure, forWrite: true)) return tenantFailure!;
+        // The legacy web-collector shape spends shared collector accounts and is not charged: outside Development only a
+        // system administrator may use it. Checked before the replay lookup and before either run store is called.
+        if (IsPlatformsShape(request) && !environment.IsDevelopment()
+            && await SystemAdministratorAccess.RequireAsync(this, adminStore, cancellationToken) is { } adminFailure)
+            return adminFailure;
         var key = Request.Headers["Idempotency-Key"].FirstOrDefault();
         if (string.IsNullOrWhiteSpace(key))
             return BadRequest(new { error = new { code = "IDEMPOTENCY_KEY_REQUIRED", message = "Idempotency-Key is required." } });
         var httpRequestHash = HashRequest(request);
+        // The initiator is decided here, never by the client: request.RequestedBy only stays in HashRequest so that
+        // idempotency keys used before this change keep replaying.
+        var requestedBy = ServerRequestedBy();
         try
         {
-            var replay = await ReplayAsync(tenantId, key, httpRequestHash, request, cancellationToken);
+            var replay = await ReplayAsync(tenantId, key, httpRequestHash, request, requestedBy, cancellationToken);
             if (replay is not null)
                 return AcceptedAtAction(nameof(Get), new { runId = replay.RunId }, replay);
             if (request.PreviewId is not null || request.TargetIds is { Count: > 0 } || request.TagIds is { Count: > 0 })
@@ -56,8 +87,9 @@ public sealed class VisibilityRunsController(
                     request.PreviewId, cancellationToken);
                 if (await ProviderUnavailableAsync(resolved.Targets, cancellationToken) is { } unavailable) return unavailable;
                 var planned = await cloroStore.CreateRunAsync(new CreateCloroVisibilityRunCommand(
-                    tenantId, request.SiteId, resolved.PromptIds, resolved.Targets, key, request.RequestedBy,
-                    resolved.SampleCount, request.PreviewId, RequireEnabledTargets: true, HttpRequestHash: httpRequestHash), cancellationToken);
+                    tenantId, request.SiteId, resolved.PromptIds, resolved.Targets, key, requestedBy,
+                    resolved.SampleCount, request.PreviewId, RequireEnabledTargets: true, HttpRequestHash: httpRequestHash,
+                    ChargeMonitoringCredits: true), cancellationToken);
                 return AcceptedAtAction(nameof(Get), new { runId = planned.RunId }, planned);
             }
             if (request.Targets is { Count: > 0 })
@@ -69,8 +101,8 @@ public sealed class VisibilityRunsController(
                 if (targets.Any(target => MonitoringProviders.IsApp(target.Provider))) return AppTargetNotAllowed();
                 if (await ProviderUnavailableAsync(targets, cancellationToken) is { } unavailable) return unavailable;
                 var cloroResult = await cloroStore.CreateRunAsync(new CreateCloroVisibilityRunCommand(
-                    tenantId, request.SiteId, request.PromptIds ?? [], targets, key, request.RequestedBy,
-                    request.SampleCount ?? 1, HttpRequestHash: httpRequestHash), cancellationToken);
+                    tenantId, request.SiteId, request.PromptIds ?? [], targets, key, requestedBy,
+                    request.SampleCount ?? 1, HttpRequestHash: httpRequestHash, ChargeMonitoringCredits: true), cancellationToken);
                 return AcceptedAtAction(nameof(Get), new { runId = cloroResult.RunId }, cloroResult);
             }
             if ((request.Platforms ?? []).Any(platform => string.Equals(platform?.Channel?.Trim(), AppChannelDefinition.CollectorChannel,
@@ -81,7 +113,7 @@ public sealed class VisibilityRunsController(
             var result = await store.CreateRunAsync(new CreateVisibilityRunCommand(
                 tenantId, request.SiteId, request.PromptIds ?? [], (request.Platforms ?? [])
                     .Select(p => new CollectorPlatformSelection(p.PlatformCode, p.EntryCode, p.Language, p.Channel)).ToArray(),
-                key, request.RequestedBy, httpRequestHash), cancellationToken);
+                key, requestedBy, httpRequestHash), cancellationToken);
             return AcceptedAtAction(nameof(Get), new { runId = result.RunId }, result);
         }
         catch (CollectorStoreException exception)
@@ -99,8 +131,20 @@ public sealed class VisibilityRunsController(
         }
     }
 
+    // The legacy web-collector shape is whatever reaches the last branch of Create: no preview, site Target or tag
+    // selection and no targets (an empty request included, which the store then rejects).
+    private static bool IsPlatformsShape(CreateVisibilityRunRequest request) =>
+        request.PreviewId is null && request.TargetIds is not { Count: > 0 } && request.TagIds is not { Count: > 0 }
+        && request.Targets is not { Count: > 0 };
+
+    // user:{userId:N} for a session user; the Development X-Tenant-Id bridge has no session user and writes a constant.
+    // Neither value can collide with the monitoring identities (prompt-monitor:…, prompt-instant:…, schedule:…).
+    private string ServerRequestedBy() => SessionAuthenticationMiddleware.GetContext(HttpContext) is { } identity
+        ? $"user:{identity.User.UserId:N}"
+        : DevBridgeRequestedBy;
+
     private async Task<VisibilityRunCreated?> ReplayAsync(Guid tenantId, string key, string httpRequestHash,
-        CreateVisibilityRunRequest request, CancellationToken cancellationToken)
+        CreateVisibilityRunRequest request, string requestedBy, CancellationToken cancellationToken)
     {
         var existing = await runQueryStore.FindReplayAsync(tenantId, key, cancellationToken);
         if (existing is null) return null;
@@ -112,8 +156,10 @@ public sealed class VisibilityRunsController(
         // Rows written before http_request_hash was introduced keep their
         // original Provider canonical hash. Preview-only rows can be compared
         // using their persisted preview ID without reading an expired preview.
+        // Those rows stored the client's requestedBy; the server-side value no longer
+        // matches it, so replaying such a key is a conflict (accepted, see README).
         if (request.PreviewId is not null && request.SiteId == existing.SiteId
-            && request.PreviewId == existing.PreviewId && request.RequestedBy == existing.RequestedBy
+            && request.PreviewId == existing.PreviewId && requestedBy == existing.RequestedBy
             && request.PromptIds is not { Count: > 0 } && request.TagIds is not { Count: > 0 }
             && request.TargetIds is not { Count: > 0 } && request.SampleCount is null
             && request.Targets is not { Count: > 0 } && request.Platforms is not { Count: > 0 })
@@ -123,7 +169,7 @@ public sealed class VisibilityRunsController(
             if (request.Targets is { Count: > 0 } && request.Platforms is not { Count: > 0 })
             {
                 var command = new CreateCloroVisibilityRunCommand(tenantId, request.SiteId, request.PromptIds ?? [],
-                    request.Targets.Select(ToTarget).ToArray(), key, request.RequestedBy,
+                    request.Targets.Select(ToTarget).ToArray(), key, requestedBy,
                     request.SampleCount ?? 1);
                 if (await cloroStore.GetExistingRunByKeyAsync(command, cancellationToken) == existing.Run.RunId)
                     return existing.Run;
@@ -132,7 +178,7 @@ public sealed class VisibilityRunsController(
             {
                 var command = new CreateVisibilityRunCommand(tenantId, request.SiteId, request.PromptIds ?? [],
                     (request.Platforms ?? []).Select(p => new CollectorPlatformSelection(p.PlatformCode, p.EntryCode,
-                        p.Language, p.Channel)).ToArray(), key, request.RequestedBy);
+                        p.Language, p.Channel)).ToArray(), key, requestedBy);
                 if (await store.GetExistingRunByKeyAsync(command, cancellationToken) == existing.Run.RunId)
                     return existing.Run;
             }
@@ -171,6 +217,7 @@ public sealed class VisibilityRunsController(
                 .ThenBy(t => t.Country, StringComparer.Ordinal).ThenBy(t => t.Locale, StringComparer.Ordinal).ToArray(),
             SampleCount = request.SampleCount ?? 1,
             request.PreviewId,
+            // Hashed only: the value is never stored or passed to a store (see ServerRequestedBy).
             request.RequestedBy,
         });
         return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(payload))).ToLowerInvariant();
@@ -365,8 +412,8 @@ public sealed class VisibilityRunsController(
 /// <summary>创建运行请求。</summary>
 /// <param name="SiteId">目标站点标识。</param>
 /// <param name="PromptIds">需要采集的 Prompt 标识。</param>
-/// <param name="Platforms">兼容的国内 Collector 平台入口。</param>
-/// <param name="RequestedBy">发起人标识。</param>
+/// <param name="Platforms">兼容的国内 Collector 平台入口，最多 20 个；非 Development 环境只允许系统管理员使用，不计费。</param>
+/// <param name="RequestedBy">已忽略，由服务端写入：运行的发起人标识按会话用户生成，本字段仅为兼容旧客户端保留，不被存储，也不参与任何计费判断。</param>
 /// <param name="Targets">API 回答 Provider（cloro、doubao_api、deepseek_api）采集目标。</param>
 /// <param name="TagIds">按标签解析的 Prompt 集合。</param>
 /// <param name="TargetIds">站点已启用 Target 标识。</param>

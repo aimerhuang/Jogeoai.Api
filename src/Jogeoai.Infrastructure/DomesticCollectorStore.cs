@@ -539,11 +539,21 @@ public sealed class DomesticCollectorStore(MySqlDatabase database) : IVisibility
         return recovered;
     }
 
-    private static void ValidateCreateCommand(CreateVisibilityRunCommand command)
+    /// <summary>一次国内网页采集运行最多包含的 Prompt 数。</summary>
+    internal const int MaxRunPrompts = 200;
+
+    /// <summary>一次国内网页采集运行最多包含的平台入口数。</summary>
+    internal const int MaxRunPlatforms = 20;
+
+    /// <summary>校验创建运行的命令；这条通道不预占积分，所以 Prompt 数与平台入口数各有上限。</summary>
+    internal static void ValidateCreateCommand(CreateVisibilityRunCommand command)
     {
         if (command.TenantId == Guid.Empty || command.SiteId == Guid.Empty || command.PromptIds is null || command.Platforms is null
             || command.PromptIds.Count == 0 || command.Platforms.Count == 0)
             throw new CollectorStoreException("INVALID_RUN", "Tenant, site, prompt and platform selections are required.", 400);
+        if (command.PromptIds.Count > MaxRunPrompts || command.Platforms.Count > MaxRunPlatforms)
+            throw new CollectorStoreException("INVALID_RUN",
+                $"A run accepts at most {MaxRunPrompts} prompts and {MaxRunPlatforms} platform entries.", 400);
         if (command.PromptIds.Count != command.PromptIds.Distinct().Count())
             throw new CollectorStoreException("INVALID_RUN", "Prompt IDs must be unique.", 400);
         if (command.Platforms.Count != command.Platforms.Select(p => p.EntryCode).Distinct(StringComparer.Ordinal).Count())

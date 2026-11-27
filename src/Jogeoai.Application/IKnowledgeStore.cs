@@ -63,7 +63,7 @@ public interface IKnowledgeStore
     /// <summary>读取租户容量使用情况。</summary>
     Task<KnowledgeUsageView> GetUsageAsync(Guid tenantId, CancellationToken cancellationToken = default);
 
-    /// <summary>领取一个摄取任务。</summary>
+    /// <summary>领取一个摄取任务。队列为空时返回 null；选中的任务租约已过期且执行次数达到上限（3 次）时，在领取事务内把任务、版本和资料记为失败（<c>KNOWLEDGE_INGEST_INTERRUPTED</c>）并同样返回 null，调用方下一轮再领取。</summary>
     Task<KnowledgeIngestJobLease?> ClaimIngestJobAsync(string workerId, TimeSpan lease,
         CancellationToken cancellationToken = default);
 

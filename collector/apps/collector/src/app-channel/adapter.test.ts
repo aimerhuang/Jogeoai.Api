@@ -14,13 +14,16 @@ import { DeviceInspector } from "./devices.ts";
 import { DriverError, MAX_SWIPES_PER_CALL, type DeviceDriver } from "./driver.ts";
 import { EvidenceStore, sha256File } from "./evidence.ts";
 import {
+  MOCK_FOREIGN_PACKAGE,
   MOCK_PACKAGE,
+  MOCK_SYSTEM_SHARE_PACKAGE,
   MockChatApp,
   MockDrivers,
   MockIconApp,
   type MockIconAppOptions,
   type MockChatOptions,
   type MockDriverOptions,
+  type MockSource,
   type MockModel,
   type MockNode,
   type MockScreen,
@@ -38,8 +41,12 @@ import {
   fakeRecorderDevice,
   ffprobeAnswer,
   iconAppContract,
+  LINK_APP_PARAMS,
+  LINK_WRAPPER_HOST,
+  linksFixture,
   referenceContract,
   steppingClock,
+  systemShareFixture,
   type FakeEmulator,
   type FakeRecorderOptions,
 } from "./test-fixtures.ts";
@@ -141,7 +148,7 @@ async function harness(options: HarnessOptions = {}) {
   });
   const collect = (
     signal: AbortSignal = new AbortController().signal,
-    leased?: Pick<AttemptRequest, "task" | "onSendIntent" | "onConfirmedSend">,
+    leased?: Pick<AttemptRequest, "task" | "onSendIntent" | "onConfirmedSend" | "stopping">,
   ) =>
     adapter.collect({
       batchId: BATCH,
@@ -2788,6 +2795,999 @@ describe("several source lists of one answer", () => {
     });
     expect(unreadable(failed)).toHaveLength(1);
     expect(unreadable(failed)[0]).not.toHaveProperty("list");
+  });
+});
+
+// Task 11-24: the link of every source, read through its page's "copy link".
+describe("links of the sources", () => {
+  // The App's own parameters as the real App appends them; every address is a placeholder.
+  const APP = LINK_APP_PARAMS.map((name) => `${name}=1`).join("&");
+  const wrapped = (target: string) =>
+    `https://${LINK_WRAPPER_HOST}/?scene=im&target=${encodeURIComponent(target)}&aid=1`;
+  const linked = (
+    app: Omit<MockChatOptions, "now">,
+    links: Record<string, unknown> = {},
+    options: Omit<HarnessOptions, "app" | "contract"> = {},
+  ) =>
+    harness({
+      recording: "off",
+      ...options,
+      app: { sourcePages: true, ...app },
+      contract: (contract) => void (contract.citations.links = { ...linksFixture(), ...links }),
+    });
+  const linkLines = (h: Awaited<ReturnType<typeof harness>>) =>
+    h.logs.filter((line) => String(line.event).startsWith("app_citation_link"));
+  const missing = (h: Awaited<ReturnType<typeof harness>>) =>
+    h.logs.filter((line) => line.event === "app_citation_link_missing");
+  const summary = (h: Awaited<ReturnType<typeof harness>>) =>
+    h.logs.find((line) => line.event === "app_citation_links");
+  // Nothing a screen showed reaches a log line: no title and no address.
+  const expectNoScreenText = (h: Awaited<ReturnType<typeof harness>>) => {
+    const text = JSON.stringify(h.logs);
+    expect(text).not.toContain("合成来源");
+    expect(text).not.toContain("example");
+    expect(text).not.toContain(LINK_WRAPPER_HOST);
+  };
+
+  it("reads the link of every source, restores it offline and keeps what was copied", async () => {
+    const h = await linked({
+      // Two rows on screen at a time, so the list is scrolled back and read screen by screen.
+      sourcesViewport: 2,
+      shareSlideMs: 800,
+      linkOverlayMs: 3_000,
+      citations: [
+        { title: "合成来源一", link: `https://example.com/a?id=1&${APP}` },
+        { title: "合成来源二", link: wrapped(`https://example.org/b?${APP}#part`) },
+        { title: "合成来源三", link: "https://example.net/c" },
+        { title: "合成来源四", link: wrapped("合成文字") },
+        { title: "合成来源五", link: `https://example.com/e?${APP}` },
+      ],
+    });
+    expect(await h.collect()).toMatchObject({ status: "valid", failureCode: null });
+    const [record] = await h.records();
+    expect(record!.citations).toEqual([
+      {
+        title: "合成来源一",
+        site: null,
+        url: "https://example.com/a?id=1",
+        link: { copied: `https://example.com/a?id=1&${APP}`, restored: true },
+      },
+      {
+        title: "合成来源二",
+        site: null,
+        url: "https://example.org/b#part",
+        link: { copied: wrapped(`https://example.org/b?${APP}#part`), restored: true },
+      },
+      {
+        title: "合成来源三",
+        site: null,
+        url: "https://example.net/c",
+        link: { copied: "https://example.net/c", restored: true },
+      },
+      // A redirect without a web address in it: the copied text, marked as not restored.
+      {
+        title: "合成来源四",
+        site: null,
+        url: wrapped("合成文字"),
+        link: { copied: wrapped("合成文字"), restored: false },
+      },
+      {
+        title: "合成来源五",
+        site: null,
+        url: "https://example.com/e",
+        link: { copied: `https://example.com/e?${APP}`, restored: true },
+      },
+    ]);
+    expect(record!.citationsStatus).toBe("read");
+    // Every page once, in the order of the list.
+    expect(h.app.pagesOpened).toEqual([
+      "合成来源一",
+      "合成来源二",
+      "合成来源三",
+      "合成来源四",
+      "合成来源五",
+    ]);
+    // Read to its end (two swipes without effect), back to the top and no further: a swipe
+    // towards the start of a list already at its top would drag the panel itself. Then one
+    // swipe per screen.
+    expect(
+      h.drivers.opened.flatMap((driver) => driver.swipes).map((swipe) => swipe.direction),
+    ).toEqual(["up", "up", "up", "up", "up", "down", "down", "down", "up", "up", "up"]);
+    expect(missing(h)).toEqual([]);
+    expect(summary(h)).toEqual({
+      event: "app_citation_links",
+      answerId: ANSWER_IDS[0],
+      total: 5,
+      withUrl: 5,
+      restored: 4,
+      elapsedMs: expect.any(Number),
+    });
+    expectNoScreenText(h);
+  });
+
+  it("taps a title again that opened nothing, and goes on after one that never opens", async () => {
+    const h = await linked({
+      citations: [
+        { title: "合成来源一", link: "https://example.com/1", deadTaps: 1 },
+        { title: "合成来源二", link: "https://example.com/2", deadTaps: Infinity },
+        { title: "合成来源三", link: "https://example.com/3" },
+      ],
+    });
+    expect(await h.collect()).toMatchObject({ status: "valid" });
+    const [record] = await h.records();
+    expect(record!.citations.map((source) => [source.url, source.link])).toEqual([
+      ["https://example.com/1", { copied: "https://example.com/1", restored: true }],
+      [null, { issue: "page_not_opened" }],
+      ["https://example.com/3", { copied: "https://example.com/3", restored: true }],
+    ]);
+    expect(missing(h)).toEqual([
+      {
+        event: "app_citation_link_missing",
+        answerId: ANSWER_IDS[0],
+        index: 2,
+        issue: "page_not_opened",
+      },
+    ]);
+    expect(summary(h)).toMatchObject({ total: 3, withUrl: 2, restored: 2 });
+    expect(summary(h)).not.toHaveProperty("stoppedBy");
+    expectNoScreenText(h);
+  });
+
+  it("does not take an unchanged clipboard for a link, except for the same source listed twice", async () => {
+    const h = await linked({
+      citations: [
+        { title: "合成来源一", link: "https://example.com/1" },
+        // The copy leaves the clipboard as it was.
+        { title: "合成来源二" },
+        // The first tap on "copy link" misses; the sheet stays and is tapped again.
+        { title: "合成来源三", link: "https://example.com/3", copyMisses: 1 },
+        // The same source twice in a row: the same link is what a working copy gives.
+        { title: "合成来源四", link: "https://example.com/4" },
+        { title: "合成来源四", link: "https://example.com/4" },
+        { title: "合成来源五", noShare: true },
+        { title: "合成来源六", link: "合成文字" },
+      ],
+    });
+    expect(await h.collect()).toMatchObject({ status: "valid" });
+    const [record] = await h.records();
+    expect(record!.citations.map((source) => source.link)).toEqual([
+      { copied: "https://example.com/1", restored: true },
+      { issue: "clipboard_unchanged" },
+      { copied: "https://example.com/3", restored: true },
+      { copied: "https://example.com/4", restored: true },
+      { copied: "https://example.com/4", restored: true },
+      { issue: "share_missing" },
+      { issue: "not_a_link" },
+    ]);
+    expect(record!.citations[1]!.url).toBeNull();
+    expect(missing(h).map((line) => [line.index, line.issue])).toEqual([
+      [2, "clipboard_unchanged"],
+      [6, "share_missing"],
+      [7, "not_a_link"],
+    ]);
+    expectNoScreenText(h);
+  });
+
+  it("keeps the titles of the sources not opened when the time for the links is up", async () => {
+    const citations = Array.from({ length: 20 }, (_, index) => ({
+      title: `合成来源${index + 1}`,
+      link: `https://example.com/${index + 1}`,
+    }));
+    const h = await linked({ citations, sourcesViewport: 8 }, { budgetSeconds: 30 });
+    expect(await h.collect()).toMatchObject({ status: "valid" });
+    const [record] = await h.records();
+    expect(record!.citations).toHaveLength(20);
+    const read = record!.citations.filter((source) => source.link && "copied" in source.link);
+    expect(read.length).toBeGreaterThan(0);
+    expect(read.length).toBeLessThan(20);
+    // The ones read come first, the others all have run out of time.
+    expect(record!.citations.slice(0, read.length)).toEqual(read);
+    expect(record!.citations.slice(read.length)).toEqual(
+      citations
+        .slice(read.length)
+        .map(({ title }) => ({ title, site: null, url: null, link: { issue: "time_budget" } })),
+    );
+    expect(summary(h)).toMatchObject({
+      total: 20,
+      withUrl: read.length,
+      stoppedBy: "time_budget",
+    });
+    expect(Number(summary(h)!.elapsedMs)).toBeGreaterThanOrEqual(30_000);
+    expect(missing(h)).toHaveLength(20 - read.length);
+    expectNoScreenText(h);
+  });
+
+  it("ends the links early on a stop request, and still saves the sample", async () => {
+    const h = await linked({
+      citations: [
+        { title: "合成来源一", link: "https://example.com/1" },
+        { title: "合成来源二", link: "https://example.com/2" },
+        { title: "合成来源三", link: "https://example.com/3" },
+      ],
+    });
+    const stop = new AbortController();
+    let reads = 0;
+    // The first read is what the clipboard held before; the second follows the first copy.
+    h.hooks.intercept = (method) => {
+      if (method === "readClipboard" && (reads += 1) === 2) stop.abort();
+    };
+    expect(await h.collect(undefined, { stopping: stop.signal })).toMatchObject({
+      status: "valid",
+      failureCode: null,
+    });
+    const [record] = await h.records();
+    expect(record!.citations.map((source) => source.link)).toEqual([
+      { copied: "https://example.com/1", restored: true },
+      { issue: "not_attempted" },
+      { issue: "not_attempted" },
+    ]);
+    expect(summary(h)).toMatchObject({ withUrl: 1, stoppedBy: "stop_requested" });
+    expect(h.app.pagesOpened).toEqual(["合成来源一"]);
+  });
+
+  // PRD R3: a failed driver command while reading links does not cost the answer or the titles.
+  const threeSources = [
+    { title: "合成来源一", link: "https://example.com/1" },
+    { title: "合成来源二", link: "https://example.com/2" },
+    { title: "合成来源三", link: "https://example.com/3" },
+  ];
+  // The `nth` clipboard read fails as a driver command does. The first read is what the
+  // clipboard held before; the second follows the first source's copy, the third the second's.
+  const failClipboardRead = (h: Awaited<ReturnType<typeof harness>>, nth: number) => {
+    let reads = 0;
+    h.hooks.intercept = (method) => {
+      if (method === "readClipboard" && (reads += 1) === nth)
+        throw new DriverError("command_failed", "readClipboard", "unknown error");
+    };
+  };
+  it("keeps the titles and the links read when a driver command fails, and saves the sample", async () => {
+    const h = await linked({ citations: threeSources });
+    failClipboardRead(h, 3);
+    expect(await h.collect()).toMatchObject({ status: "valid", failureCode: null });
+    const [record] = await h.records();
+    expect(record!.citationsStatus).toBe("read");
+    expect(record!.citations).toEqual([
+      {
+        title: "合成来源一",
+        site: null,
+        url: "https://example.com/1",
+        link: { copied: "https://example.com/1", restored: true },
+      },
+      { title: "合成来源二", site: null, url: null, link: { issue: "not_attempted" } },
+      { title: "合成来源三", site: null, url: null, link: { issue: "not_attempted" } },
+    ]);
+    // The page that was open when the command failed was left by the clean-up.
+    expect(h.app.pagesOpened).toEqual(["合成来源一", "合成来源二"]);
+    expect(missing(h).map((line) => [line.index, line.issue])).toEqual([
+      [2, "not_attempted"],
+      [3, "not_attempted"],
+    ]);
+    expect(summary(h)).toEqual({
+      event: "app_citation_links",
+      answerId: ANSWER_IDS[0],
+      total: 3,
+      withUrl: 1,
+      restored: 1,
+      elapsedMs: expect.any(Number),
+      stoppedBy: "driver_error",
+      driver: { command: "readClipboard", errorName: "unknown error" },
+      // The read ended early: how its one screen went (design §12.1).
+      screens: [{ all: 3, whole: 3, at: 1, next: 1, opened: 2, waited: false }],
+    });
+    // Not a failed source read: the list is not given up.
+    expect(h.logs.map((line) => line.event)).not.toContain("app_citations_unreadable");
+    expectNoScreenText(h);
+  });
+
+  it("saves no sample when the page open at a failed driver command does not close", async () => {
+    const h = await linked({ pageStuck: true, citations: threeSources });
+    failClipboardRead(h, 2);
+    expect(await h.collect()).toMatchObject({
+      status: "failed",
+      failureCode: "app_contract_changed",
+      phase: "post_send",
+    });
+    expect(h.app.pagesOpened).toEqual(["合成来源一"]);
+    expect(missing(h).map((line) => [line.index, line.issue])).toEqual([
+      [1, "not_attempted"],
+      [2, "not_attempted"],
+      [3, "not_attempted"],
+    ]);
+    expect(summary(h)).toMatchObject({ withUrl: 0, stoppedBy: "driver_error" });
+    expect(h.logs.find((line) => line.event === "app_attempt_failure_cause")).toMatchObject({
+      cause: "answer_end_not_visible",
+    });
+    // Nothing pressed by the read after the failure; three presses by the clean-up.
+    expect(h.driverCalls().filter((call) => call === "back")).toHaveLength(3);
+    const [record] = await h.records();
+    expect(record!.citationsStatus).toBeUndefined();
+  });
+
+  it("keeps the class of a blocker that shows with a failed driver command", async () => {
+    let blocked = false;
+    let gesturesOnBlocker = 0;
+    const h = await linked(
+      { citations: threeSources },
+      {},
+      {
+        screen: (screen) =>
+          blocked
+            ? {
+                foreground: MOCK_PACKAGE,
+                nodes: [{ id: "com.larus.nova:id/mock_verification", text: "合成验证页" }],
+              }
+            : screen,
+      },
+    );
+    let reads = 0;
+    h.hooks.intercept = (method) => {
+      if (blocked && (method === "back" || method === "tap" || method === "swipe"))
+        gesturesOnBlocker += 1;
+      if (method === "readClipboard" && (reads += 1) === 3) {
+        blocked = true;
+        throw new DriverError("command_failed", "readClipboard");
+      }
+    };
+    expect(await h.collect()).toMatchObject({
+      status: "failed",
+      failureCode: "challenge_required",
+      phase: "post_send",
+    });
+    expect(gesturesOnBlocker).toBe(0);
+  });
+
+  it("saves no sample when a source's page does not close, and opens nothing after it", async () => {
+    const h = await linked({
+      pageStuck: true,
+      citations: [
+        { title: "合成来源一", link: "https://example.com/1" },
+        { title: "合成来源二", link: "https://example.com/2" },
+      ],
+    });
+    expect(await h.collect()).toMatchObject({
+      status: "failed",
+      failureCode: "app_contract_changed",
+      phase: "post_send",
+    });
+    expect(h.app.pagesOpened).toEqual(["合成来源一"]);
+    expect(missing(h).map((line) => [line.index, line.issue])).toEqual([
+      [1, "page_not_closed"],
+      [2, "not_attempted"],
+    ]);
+    expect(summary(h)).toMatchObject({ withUrl: 0, stoppedBy: "page_not_closed" });
+    expect(h.logs.find((line) => line.event === "app_attempt_failure_cause")).toMatchObject({
+      cause: "answer_end_not_visible",
+    });
+    // Bounded: three presses on the page while reading, three more by the clean-up.
+    expect(h.driverCalls().filter((call) => call === "back")).toHaveLength(6);
+    const [record] = await h.records();
+    expect(record!.citationsStatus).toBeUndefined();
+  });
+
+  it("keeps the class of a blocker on a source's page and presses nothing on it", async () => {
+    const h = await linked({
+      blocker: { code: "challenge_required", when: "source_page" },
+      citations: [
+        { title: "合成来源一", link: "https://example.com/1" },
+        { title: "合成来源二", link: "https://example.com/2" },
+      ],
+    });
+    expect(await h.collect()).toMatchObject({
+      status: "failed",
+      failureCode: "challenge_required",
+      phase: "post_send",
+    });
+    expect(h.driverCalls()).not.toContain("back");
+    expect(h.app.pagesOpened).toEqual(["合成来源一"]);
+    expect(linkLines(h)).toEqual([]);
+  });
+
+  it("reads the links of a list among several and names the list in its log lines", async () => {
+    const h = await harness({
+      recording: "off",
+      app: {
+        sourcePages: true,
+        citations: [
+          { title: "合成来源一" },
+          { title: "合成来源二", link: "https://example.com/2" },
+        ],
+      },
+      contract: (contract) => {
+        const cited = { ...contract.citations, label: "cited", links: linksFixture() };
+        // A second path whose entry this answer does not show.
+        const other = {
+          label: "other",
+          entry: { id: "com.larus.nova:id/mock_absent_entry" },
+          panel: { text: "合成面板" },
+          itemTitle: { id: "com.larus.nova:id/tv_reference_content" },
+          close: { back: true },
+        };
+        (contract as Record<string, unknown>).citations = [cited, other];
+      },
+    });
+    expect(await h.collect()).toMatchObject({ status: "valid" });
+    expect(missing(h)).toEqual([
+      {
+        event: "app_citation_link_missing",
+        answerId: ANSWER_IDS[0],
+        list: "cited",
+        index: 1,
+        issue: "clipboard_unchanged",
+      },
+    ]);
+    expect(summary(h)).toMatchObject({ list: "cited", total: 2, withUrl: 1 });
+    const [record] = await h.records();
+    expect(record!.citations.map((source) => [source.list, source.url])).toEqual([
+      ["cited", null],
+      ["cited", "https://example.com/2"],
+    ]);
+  });
+
+  const onPage = (screen: MockScreen) =>
+    screen.nodes.some((node) => node.id === "com.larus.nova:id/bullet_container");
+  const twoSources = [
+    { title: "合成来源一", link: "https://example.com/1" },
+    { title: "合成来源二", link: "https://example.com/2" },
+  ];
+
+  it.each([
+    ["the back key", { back: true }],
+    ["its close control", { id: "com.larus.nova:id/bottom_sheet_close" }],
+  ])(
+    "does not close the panel by %s under a notice that showed while the links were read",
+    async (_, close) => {
+      let shown = false;
+      let gesturesOnNotice = 0;
+      const h = await harness({
+        recording: "off",
+        app: { sourcePages: true, citations: twoSources },
+        contract: (contract) => {
+          contract.citations.links = linksFixture();
+          contract.citations.close = close;
+        },
+        // Once the last page was left, a rate-limit notice shows over the panel.
+        screen: (screen, app) => {
+          if (app.pagesOpened.length < 2 || onPage(screen)) return screen;
+          shown = true;
+          return {
+            ...screen,
+            nodes: [
+              ...screen.nodes,
+              { className: "android.widget.TextView", text: "合成提示：操作过于频繁" },
+            ],
+          };
+        },
+      });
+      h.hooks.intercept = (method) => {
+        if (shown && (method === "back" || method === "tap" || method === "swipe"))
+          gesturesOnNotice += 1;
+      };
+      expect(await h.collect()).toMatchObject({
+        status: "failed",
+        failureCode: "rate_limited",
+        phase: "post_send",
+      });
+      expect(h.app.pagesOpened).toEqual(["合成来源一", "合成来源二"]);
+      expect(gesturesOnNotice).toBe(0);
+    },
+  );
+
+  it("does not swipe for the end of the answer on a blocker that took the panel's place", async () => {
+    let shown = false;
+    let gesturesOnBlocker = 0;
+    const h = await harness({
+      recording: "off",
+      app: { sourcePages: true, citations: twoSources },
+      contract: (contract) => {
+        contract.citations.links = linksFixture();
+        // An App whose end of answer is brought on screen by swiping.
+        contract.completion.reveal = [{ swipe: "up", count: 1 }];
+      },
+      // Leaving the first page leads to a verification screen instead of the panel.
+      screen: (screen, app) => {
+        if (app.pagesOpened.length === 0 || onPage(screen)) return screen;
+        shown = true;
+        return {
+          foreground: MOCK_PACKAGE,
+          nodes: [{ id: "com.larus.nova:id/mock_verification", text: "合成验证页" }],
+        };
+      },
+    });
+    h.hooks.intercept = (method) => {
+      if (shown && (method === "back" || method === "tap" || method === "swipe"))
+        gesturesOnBlocker += 1;
+    };
+    expect(await h.collect()).toMatchObject({
+      status: "failed",
+      failureCode: "challenge_required",
+      phase: "post_send",
+    });
+    expect(h.app.pagesOpened).toEqual(["合成来源一"]);
+    expect(gesturesOnBlocker).toBe(0);
+  });
+
+  it("does not tap a page's close control on a blocker that showed over the page", async () => {
+    let shown = false;
+    let gesturesOnBlocker = 0;
+    const h = await harness({
+      recording: "off",
+      app: { sourcePages: true, citations: twoSources },
+      contract: (contract) => {
+        contract.citations.links = {
+          ...linksFixture(),
+          close: { id: "com.larus.nova:id/btn_back" },
+        };
+      },
+      // Once the first link was copied, a rate-limit notice shows over the page.
+      screen: (screen, app) => {
+        if (!onPage(screen) || app.clipboard() !== "https://example.com/1") return screen;
+        shown = true;
+        return {
+          ...screen,
+          nodes: [
+            ...screen.nodes,
+            { className: "android.widget.TextView", text: "合成提示：操作过于频繁" },
+          ],
+        };
+      },
+    });
+    h.hooks.intercept = (method) => {
+      if (shown && (method === "back" || method === "tap" || method === "swipe"))
+        gesturesOnBlocker += 1;
+    };
+    expect(await h.collect()).toMatchObject({
+      status: "failed",
+      failureCode: "rate_limited",
+      phase: "post_send",
+    });
+    expect(h.app.pagesOpened).toEqual(["合成来源一"]);
+    expect(gesturesOnBlocker).toBe(0);
+  });
+
+  it("does not swipe through the rest of the list once a stop was requested", async () => {
+    // Six sources, two whole rows on screen at a time: more screens to go.
+    const citations = Array.from({ length: 6 }, (_, index) => ({
+      title: `合成来源${index + 1}`,
+      link: `https://example.com/${index + 1}`,
+    }));
+    const h = await linked({ citations, sourcesViewport: 2 });
+    const stop = new AbortController();
+    let reads = 0;
+    let swipesAfterStop = 0;
+    h.hooks.intercept = (method) => {
+      // The third read follows the copy of the second source, the last on the first screen.
+      if (method === "readClipboard" && (reads += 1) === 3) stop.abort();
+      if (stop.signal.aborted && method === "swipe") swipesAfterStop += 1;
+    };
+    expect(await h.collect(undefined, { stopping: stop.signal })).toMatchObject({
+      status: "valid",
+    });
+    const [record] = await h.records();
+    expect(
+      record!.citations.filter((source) => source.link && "copied" in source.link),
+    ).toHaveLength(2);
+    expect(summary(h)).toMatchObject({ withUrl: 2, stoppedBy: "stop_requested" });
+    expect(swipesAfterStop).toBe(0);
+  });
+
+  it("gives each of two sources with the same title its own link across screens", async () => {
+    const h = await linked({
+      sourcesViewport: 2,
+      linkOverlayMs: 3_000,
+      citations: [
+        { title: "合成来源一", link: "https://example.com/1" },
+        { title: "合成来源二", link: "https://example.com/2a" },
+        { title: "合成来源二", link: "https://example.com/2b" },
+        { title: "合成来源三", link: "https://example.com/3" },
+        { title: "合成来源四", link: "https://example.com/4" },
+      ],
+    });
+    expect(await h.collect()).toMatchObject({ status: "valid" });
+    const [record] = await h.records();
+    expect(record!.citations.map((source) => source.url)).toEqual([
+      "https://example.com/1",
+      "https://example.com/2a",
+      "https://example.com/2b",
+      "https://example.com/3",
+      "https://example.com/4",
+    ]);
+    expect(missing(h)).toEqual([]);
+  });
+
+  // Task 11-24 §11.1 (real-device smoke 2026-11-25): Android's own share sheet and other Apps.
+  const withMiddle = (middle: Partial<MockSource>) => [
+    { title: "合成来源一", link: "https://example.com/1" },
+    { title: "合成来源二", link: "https://example.com/2", ...middle },
+    { title: "合成来源三", link: "https://example.com/3" },
+  ];
+  const linksOf = async (h: Awaited<ReturnType<typeof harness>>) =>
+    (await h.records())[0]!.citations.map((source) => source.link);
+  const backs = (h: Awaited<ReturnType<typeof harness>>) =>
+    h.driverCalls().filter((call) => call === "back").length;
+  const allGot = [1, 2, 3].map((n) => ({ copied: `https://example.com/${n}`, restored: true }));
+
+  it("copies the link from Android's share sheet where the contract declares it", async () => {
+    const h = await linked(
+      { citations: withMiddle({ systemShare: "dismisses" }) },
+      { systemShare: systemShareFixture() },
+    );
+    expect(await h.collect()).toMatchObject({ status: "valid", failureCode: null });
+    expect(await linksOf(h)).toEqual(allGot);
+    // One press per page; the sheet closed itself after its copy.
+    expect(backs(h)).toBe(3);
+    expect(missing(h)).toEqual([]);
+    expectNoScreenText(h);
+  });
+
+  it("presses back once for Android's share sheet that stays after its copy", async () => {
+    const h = await linked(
+      { citations: withMiddle({ systemShare: "stays" }) },
+      { systemShare: systemShareFixture() },
+    );
+    expect(await h.collect()).toMatchObject({ status: "valid", failureCode: null });
+    expect(await linksOf(h)).toEqual(allGot);
+    // One press for the sheet, one per page.
+    expect(backs(h)).toBe(4);
+  });
+
+  it("leaves Android's share sheet the contract does not declare, and reads the sources after it", async () => {
+    // On the code before §11 this was `app_crashed` (`foreground_other`): the sample was lost.
+    const h = await linked({ citations: withMiddle({ systemShare: "dismisses" }) });
+    expect(await h.collect()).toMatchObject({ status: "valid", failureCode: null });
+    expect(await linksOf(h)).toEqual([allGot[0], { issue: "share_external" }, allGot[2]]);
+    expect(h.app.pagesOpened).toEqual(["合成来源一", "合成来源二", "合成来源三"]);
+    expect(missing(h).map((line) => [line.index, line.issue])).toEqual([[2, "share_external"]]);
+    // The sheet, then its page, then one per other page.
+    expect(backs(h)).toBe(4);
+    expectNoScreenText(h);
+  });
+
+  it("goes back from another App a source opened, and reads the sources after it", async () => {
+    // On the code before §11 this was `app_crashed` (`foreground_other`).
+    const h = await linked({ citations: withMiddle({ opensApp: "returns" }) });
+    expect(await h.collect()).toMatchObject({ status: "valid", failureCode: null });
+    expect(await linksOf(h)).toEqual([allGot[0], { issue: "left_app" }, allGot[2]]);
+    expect(h.app.pagesOpened).toEqual(["合成来源一", "合成来源三"]);
+    expect(missing(h).map((line) => [line.index, line.issue])).toEqual([[2, "left_app"]]);
+    expectNoScreenText(h);
+  });
+
+  it("is a crash, as before, when another App a source opened does not give way", async () => {
+    const h = await linked({ citations: withMiddle({ opensApp: "stays" }) });
+    expect(await h.collect()).toMatchObject({
+      status: "failed",
+      failureCode: "app_crashed",
+      phase: "post_send",
+    });
+    expect(h.logs.find((line) => line.event === "app_attempt_failure_cause")).toMatchObject({
+      cause: "foreground_other",
+    });
+    // Bounded: two presses.
+    expect(backs(h)).toBe(3);
+  });
+
+  // Android's sheet declared: a copy that changed nothing is `share_external`, a copy that gave
+  // text that is not an address is `not_a_link`, as on the App's own sheet.
+  it.each([
+    [
+      "an unchanged clipboard",
+      { systemShare: "stays" as const, link: undefined },
+      { issue: "share_external" },
+    ],
+    [
+      "text that is not a link",
+      { systemShare: "dismisses" as const, link: "合成文字" },
+      { issue: "not_a_link" },
+    ],
+  ])("gives no link for %s from Android's share sheet", async (_, middle, expected) => {
+    const h = await linked(
+      { citations: withMiddle(middle) },
+      { systemShare: systemShareFixture() },
+    );
+    expect(await h.collect()).toMatchObject({ status: "valid", failureCode: null });
+    expect(await linksOf(h)).toEqual([allGot[0], expected, allGot[2]]);
+    expectNoScreenText(h);
+  });
+
+  // The smoke could not tell whether Android's sheet came from the share control or from the App
+  // sheet's "more" (research/smoke-20261125.md): both must leave the sample whole (PRD R9).
+  it.each([
+    ["without", {}],
+    ["with", { systemShare: systemShareFixture() }],
+  ])(
+    "leaves Android's share sheet opened from the App's own sheet, %s it declared",
+    async (_, links) => {
+      // On the code before this check the clean-up's back press met Android's sheet in front:
+      // `app_crashed` (`foreground_other`), and the sample was lost.
+      const h = await linked({ citations: withMiddle({ copyOpensChooser: true }) }, links);
+      expect(await h.collect()).toMatchObject({ status: "valid", failureCode: null });
+      expect(await linksOf(h)).toEqual([allGot[0], { issue: "share_external" }, allGot[2]]);
+      expect(missing(h).map((line) => [line.index, line.issue])).toEqual([[2, "share_external"]]);
+      // The sheet, then its page, then one per other page.
+      expect(backs(h)).toBe(4);
+      expectNoScreenText(h);
+    },
+  );
+
+  it.each([
+    ["Android's share sheet", { systemShare: "dismisses" as const }, MOCK_SYSTEM_SHARE_PACKAGE],
+    ["another App", { opensApp: "returns" as const }, MOCK_FOREIGN_PACKAGE],
+  ])("keeps the class of a blocker on %s and presses nothing on it", async (_, middle, pkg) => {
+    let shown = false;
+    let gesturesOnBlocker = 0;
+    const h = await linked(
+      { citations: withMiddle(middle) },
+      { systemShare: systemShareFixture() },
+      {
+        screen: (screen) => {
+          if (screen.foreground !== pkg) return screen;
+          shown = true;
+          return {
+            ...screen,
+            nodes: [
+              ...screen.nodes,
+              { className: "android.widget.TextView", text: "合成提示：操作过于频繁" },
+            ],
+          };
+        },
+      },
+    );
+    h.hooks.intercept = (method) => {
+      if (shown && (method === "back" || method === "tap" || method === "swipe"))
+        gesturesOnBlocker += 1;
+    };
+    expect(await h.collect()).toMatchObject({
+      status: "failed",
+      failureCode: "rate_limited",
+      phase: "post_send",
+    });
+    expect(gesturesOnBlocker).toBe(0);
+  });
+
+  // Task 11-24 §11.2 (R10): the clipboard preview over the last rows of the list.
+  it("waits once for the clipboard preview before taking the list as ended", async () => {
+    const citations = Array.from({ length: 7 }, (_, index) => ({
+      title: `合成来源${index + 1}`,
+      link: `https://example.com/${index + 1}`,
+    }));
+    // The preview hides the last two rows on screen for longer than two looks at the list, and
+    // for less than the time a preview is given.
+    const h = await linked({
+      citations,
+      sourcesViewport: 5,
+      linkOverlayMs: 8_000,
+      linkOverlayRows: 2,
+    });
+    expect(await h.collect()).toMatchObject({ status: "valid", failureCode: null });
+    // On the code before §11.2, sources 6 and 7 were `not_reached` (`list_not_moving`).
+    expect((await linksOf(h)).every((link) => link !== undefined && "copied" in link)).toBe(true);
+    expect(missing(h)).toEqual([]);
+    expect(summary(h)).toMatchObject({ total: 7, withUrl: 7 });
+    expect(summary(h)).not.toHaveProperty("stoppedBy");
+  });
+
+  it("changes nothing by declaring Android's share sheet where no source opens it", async () => {
+    const run = async (links: Record<string, unknown>) => {
+      const h = await linked({ sourcesViewport: 2, citations: withMiddle({}) }, links);
+      expect(await h.collect()).toMatchObject({ status: "valid" });
+      return { record: (await h.records())[0]!, calls: h.driverCalls() };
+    };
+    const without = await run({});
+    const declared = await run({ systemShare: systemShareFixture() });
+    expect(declared.record.citations).toEqual(without.record.citations);
+    expect(declared.calls).toEqual(without.calls);
+  });
+
+  it("changes nothing for a contract without links", async () => {
+    const h = await harness({
+      recording: "off",
+      app: {
+        sourcePages: true,
+        citations: [
+          { title: "合成来源一", link: "https://example.com/1" },
+          { title: "合成来源二" },
+        ],
+      },
+    });
+    expect(await h.collect()).toMatchObject({ status: "valid" });
+    const [record] = await h.records();
+    // The record is what it always was: no `link` on any source.
+    expect(record!.citations).toEqual([
+      { title: "合成来源一", site: null, url: null },
+      { title: "合成来源二", site: null, url: null },
+    ]);
+    expect(JSON.stringify(record)).not.toContain('"link"');
+    // No page was opened and the clipboard was never read.
+    expect(h.app.pagesOpened).toEqual([]);
+    expect(h.driverCalls()).not.toContain("readClipboard");
+    expect(linkLines(h)).toEqual([]);
+    // Nor is a screen kept for a stop of a link read.
+    expect(record).not.toHaveProperty("linkStop");
+    expect(await h.recordFiles()).not.toContain("links-stop.png");
+  });
+
+  // Task 11-24 §12: diagnostics for sources at the end of the list that are not reached.
+  // Once the first page was opened, the last two rows of the list no longer show at all.
+  const endHidden = (
+    app: Omit<MockChatOptions, "now"> = {},
+    options: Omit<HarnessOptions, "app" | "contract"> = {},
+  ) =>
+    linked(
+      {
+        sourcesViewport: 5,
+        citations: Array.from({ length: 7 }, (_, index) => ({
+          title: `合成来源${index + 1}`,
+          link: `https://example.com/${index + 1}`,
+        })),
+        ...app,
+      },
+      {},
+      {
+        screen: (screen, app) =>
+          app.pagesOpened.length === 0
+            ? screen
+            : {
+                ...screen,
+                nodes: screen.nodes.filter(
+                  (node) =>
+                    !node.children?.some(
+                      (child) => child.text === "合成来源6" || child.text === "合成来源7",
+                    ),
+                ),
+              },
+        ...options,
+      },
+    );
+  const recordDirectory = (h: Awaited<ReturnType<typeof harness>>) =>
+    join(h.store.root, "batches", BATCH, "records", ANSWER_IDS[0]!);
+
+  it("logs how each screen went and keeps the screen where the list stopped moving", async () => {
+    const h = await endHidden();
+    expect(await h.collect()).toMatchObject({ status: "valid", failureCode: null });
+    const [record] = await h.records();
+    expect(record!.citations.map((source) => source.link)).toEqual([
+      ...[1, 2, 3, 4, 5].map((n) => ({ copied: `https://example.com/${n}`, restored: true })),
+      { issue: "not_reached" },
+      { issue: "not_reached" },
+    ]);
+    // The first screen opened five; after the swipe the list showed sources 3 to 5 and nothing
+    // new, twice; the wait for the clipboard preview ran on that screen, and the one swipe after
+    // it showed the same screen again (design §13).
+    expect(summary(h)).toEqual({
+      event: "app_citation_links",
+      answerId: ANSWER_IDS[0],
+      total: 7,
+      withUrl: 5,
+      restored: 5,
+      elapsedMs: expect.any(Number),
+      stoppedBy: "list_not_moving",
+      screens: [
+        { all: 5, whole: 5, at: 1, next: 1, opened: 5, waited: false },
+        { all: 3, whole: 3, at: 3, next: 6, opened: 0, waited: false },
+        { all: 3, whole: 3, at: 3, next: 6, opened: 0, waited: false },
+        { all: 3, whole: 3, at: 3, next: 6, opened: 0, waited: true },
+        { all: 3, whole: 3, at: 3, next: 6, opened: 0, waited: false },
+      ],
+      // Of the three conditions behind `list_not_moving`, the list did not move.
+      listStop: "unmoved",
+    });
+    // A list that really ends gets exactly one swipe more after the wait: read to its end (one
+    // swipe that moved it, two that did not), back to its top, then one swipe per screen and the
+    // one after the wait.
+    expect(
+      h.drivers.opened.flatMap((driver) => driver.swipes).map((swipe) => swipe.direction),
+    ).toEqual(["up", "up", "up", "down", "up", "up", "up", "up"]);
+    // The screen and hierarchy of that moment, private, in the record directory.
+    const directory = recordDirectory(h);
+    expect(await h.recordFiles()).toEqual(
+      expect.arrayContaining(["links-stop.png", "links-stop.xml"]),
+    );
+    for (const file of ["links-stop.png", "links-stop.xml"])
+      expect((await lstat(join(directory, file))).mode & 0o777).toBe(0o600);
+    expect(record!.linkStop).toEqual({
+      screenshot: {
+        file: "links-stop.png",
+        sha256: await sha256File(join(directory, "links-stop.png")),
+        bytes: (await lstat(join(directory, "links-stop.png"))).size,
+      },
+      hierarchy: {
+        file: "links-stop.xml",
+        sha256: await sha256File(join(directory, "links-stop.xml")),
+        bytes: (await lstat(join(directory, "links-stop.xml"))).size,
+      },
+    });
+    // The hierarchy is that of the panel at the stop, not of the final screen.
+    const xml = await readFile(join(directory, "links-stop.xml"), "utf8");
+    expect(xml).toContain("bottom_sheet_title");
+    expect(xml).not.toContain("合成来源6");
+    // Counts only in the log.
+    expectNoScreenText(h);
+  });
+
+  it("keeps the sample when the screen at the stop cannot be taken", async () => {
+    const h = await endHidden();
+    // The first screenshot of the attempt is the one at the stop; the hierarchy export after
+    // it is that of the stop as well.
+    let failing = false;
+    let screenshots = 0;
+    h.hooks.intercept = (method) => {
+      if (method === "screenshot" && (screenshots += 1) === 1) {
+        failing = true;
+        throw new DriverError("command_failed", "screenshot");
+      }
+      if (method === "hierarchy" && failing) {
+        failing = false;
+        throw new DriverError("command_failed", "hierarchy");
+      }
+    };
+    expect(await h.collect()).toMatchObject({ status: "valid", failureCode: null });
+    const [record] = await h.records();
+    expect(record!.linkStop).toEqual({ screenshot: null, hierarchy: null });
+    expect(record!.screenshot).not.toBeNull();
+    expect(summary(h)).toMatchObject({ stoppedBy: "list_not_moving" });
+    expect(await h.recordFiles()).not.toContain("links-stop.png");
+    expect(await h.recordFiles()).not.toContain("links-stop.xml");
+  });
+
+  // Task 11-24 §13 (root cause reproduced on the real device): a swipe right after a copy does
+  // nothing while Android's clipboard preview shows.
+  it("swipes once more after the clipboard preview went, and reads the sources at the end", async () => {
+    const citations = Array.from({ length: 7 }, (_, index) => ({
+      title: `合成来源${index + 1}`,
+      link: `https://example.com/${index + 1}`,
+    }));
+    // Longer than two looks at the list after the last copy of a screen, shorter than the time
+    // a preview is given.
+    const h = await linked({ citations, sourcesViewport: 5, linkSwipeSwallowMs: 8_000 });
+    expect(await h.collect()).toMatchObject({ status: "valid", failureCode: null });
+    // On the code before §13 sources 6 and 7 were `not_reached` (`list_not_moving`, `unmoved`).
+    expect(await linksOf(h)).toEqual(
+      citations.map(({ link }) => ({ copied: link, restored: true })),
+    );
+    expect(missing(h)).toEqual([]);
+    expect(summary(h)).toMatchObject({ total: 7, withUrl: 7 });
+    expect(summary(h)).not.toHaveProperty("stoppedBy");
+    expect(summary(h)).not.toHaveProperty("screens");
+  });
+
+  it("ends with the time for the links when it runs out during the wait for the preview", async () => {
+    const h = await endHidden();
+    // The budget is made to end a few seconds after the last swipe before the wait: the time
+    // is still left when the wait begins, and is up when it ends.
+    let startedAt: number | undefined;
+    let swipes = 0;
+    h.hooks.intercept = (method) => {
+      if (method === "readClipboard") startedAt ??= h.clock.now().getTime();
+      // Three to read the list to its end, one back to its top, three on the screens.
+      if (method === "swipe" && (swipes += 1) === 7)
+        h.clock.advance(startedAt! + 180_000 - 4_000 - h.clock.now().getTime());
+    };
+    expect(await h.collect()).toMatchObject({ status: "valid", failureCode: null });
+    expect(await linksOf(h)).toEqual([
+      ...[1, 2, 3, 4, 5].map((n) => ({ copied: `https://example.com/${n}`, restored: true })),
+      { issue: "time_budget" },
+      { issue: "time_budget" },
+    ]);
+    expect(summary(h)).toMatchObject({ stoppedBy: "time_budget" });
+    expect(summary(h)!.screens).toEqual([
+      { all: 5, whole: 5, at: 1, next: 1, opened: 5, waited: false },
+      { all: 3, whole: 3, at: 3, next: 6, opened: 0, waited: false },
+      { all: 3, whole: 3, at: 3, next: 6, opened: 0, waited: false },
+      { all: 3, whole: 3, at: 3, next: 6, opened: 0, waited: true },
+    ]);
+    // No swipe after the wait.
+    expect(swipes).toBe(7);
+    // Not a stop of a list that did not move: no screen kept for it.
+    expect((await h.records())[0]).not.toHaveProperty("linkStop");
+  });
+
+  it("adds nothing to a read of links that got through", async () => {
+    const h = await linked({ citations: threeSources });
+    expect(await h.collect()).toMatchObject({ status: "valid" });
+    expect(summary(h)).not.toHaveProperty("screens");
+    expect(summary(h)).not.toHaveProperty("stoppedBy");
+    expect((await h.records())[0]).not.toHaveProperty("linkStop");
+    expect(await h.recordFiles()).not.toContain("links-stop.png");
   });
 });
 

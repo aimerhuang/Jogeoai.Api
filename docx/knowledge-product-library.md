@@ -12,7 +12,7 @@
 2. 手动填写产品名、关联品牌、产品介绍（必填）、优势、适用场景与人群、客户案例、规格参数（≤ 50 项）、产品页面网址、标签；可用「AI 智能补全」按产品名与品牌知识库补全空字段。
 3. 添加产品详情页网址：服务端用文章导入同一套公开网址安全读取规则抓取正文，存为 `.md` 链接资料（`sourceKind=link`），再发起识别。
 
-识别任务由 Worker `ProductParseWorker` 领取（2 分钟租约、心跳、最多 3 次重试），调用研究 Provider 配置中的 `openai-compatible` 网关与固定模型 `gpt-6-luna`。文本资料送文本；JPG / PNG 和抽取文本不足 200 字的 PDF 以 OpenAI 兼容的 `image_url` 内容块送图片（单张 ≤ 10 MB、最多 20 张）。模型只产出逐字段草稿，每个字段带来源片段或「未找到」标记，产品进入「待核验」。识别不消耗积分，每租户每日 50 次。
+识别任务由 Worker `ProductParseWorker` 领取（2 分钟租约、心跳、最多 3 次重试；2026-11-27 起租约过期且已执行 3 次的任务在领取时记为失败 `PRODUCT_PARSE_INTERRUPTED`，不再无限重领；本机 Worker 已于当日用该构建重启，SQL 用例已在本机隔离库通过，没有在运行态触发过，见 [品牌知识库说明](brand-knowledge.md#摄取重领上限与文件解析预算2026-11-27本机已部署)），调用研究 Provider 配置中的 `openai-compatible` 网关与固定模型 `gpt-6-luna`。文本资料送文本；JPG / PNG 和抽取文本不足 200 字的 PDF 以 OpenAI 兼容的 `image_url` 内容块送图片（单张 ≤ 10 MB、最多 20 张）。模型只产出逐字段草稿，每个字段带来源片段或「未找到」标记，产品进入「待核验」。识别不消耗积分，每租户每日 50 次。
 
 核验入库要求所有 AI 识别且已找到的字段逐个确认（`verifiedFields`），入库后按固定 Markdown 模板写入品牌知识库（`documentType=product`、`productKey=<产品 UUID>`、`sourceKind=product`），进入 RAG 检索；文章生成 `article-generation/options` 新增 `products`（仅已入库），`material-preview` 的 `productKey` 可传产品 UUID。归档产品停用对应资料。
 
@@ -32,7 +32,7 @@
 | POST | `/knowledge/products/{productId}/archive` | 归档 |
 | POST | `/knowledge/products/{productId}/sync-knowledge` | 重试写入知识库 |
 
-权限沿用内容管理：真实会话 + 租户成员；viewer 只读；member 只能修改自己创建的产品；owner / admin 不限。错误码：`PRODUCT_NOT_FOUND`、`PRODUCT_NAME_CONFLICT`、`PRODUCT_VALIDATION`、`PRODUCT_PARSE_IN_PROGRESS`、`PRODUCT_PARSE_RATE_LIMITED`（429）、`PRODUCT_PARSE_IMAGE_UNSUPPORTED`、`PRODUCT_PARSE_INVALID_OUTPUT`、`PRODUCT_PARSE_RETRYABLE`、`PRODUCT_FIELDS_UNVERIFIED`、`PRODUCT_STATE_CONFLICT`、`KNOWLEDGE_LINK_UNREADABLE`（422）。`POST /knowledge/links` 已于 2026-11-07 下线（安全修复 C1）；产品网址识别仍在入队前内部登记链接资料。字段与响应以运行环境 Swagger 和 [领域 DTO](../src/Jogeoai.Domain/KnowledgeProductModels.cs) 为准。
+权限沿用内容管理：真实会话 + 租户成员；viewer 只读；member 只能修改自己创建的产品；owner / admin 不限。错误码：`PRODUCT_NOT_FOUND`、`PRODUCT_NAME_CONFLICT`、`PRODUCT_VALIDATION`、`PRODUCT_PARSE_IN_PROGRESS`、`PRODUCT_PARSE_RATE_LIMITED`（429）、`PRODUCT_PARSE_IMAGE_UNSUPPORTED`、`PRODUCT_PARSE_INVALID_OUTPUT`、`PRODUCT_PARSE_RETRYABLE`、`PRODUCT_PARSE_INTERRUPTED`（2026-11-27 新增，任务内失败码）、`PRODUCT_FIELDS_UNVERIFIED`、`PRODUCT_STATE_CONFLICT`、`KNOWLEDGE_LINK_UNREADABLE`（422）。`POST /knowledge/links` 已于 2026-11-07 下线（安全修复 C1）；产品网址识别仍在入队前内部登记链接资料。字段与响应以运行环境 Swagger 和 [领域 DTO](../src/Jogeoai.Domain/KnowledgeProductModels.cs) 为准。
 
 ## 数据与迁移
 

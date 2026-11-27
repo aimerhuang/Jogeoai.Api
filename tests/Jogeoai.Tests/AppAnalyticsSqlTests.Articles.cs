@@ -61,7 +61,8 @@ public sealed partial class AppAnalyticsSqlTests
         context.Request.Headers["X-Tenant-Id"] = w.Tenant.ToString();
         return new VisibilityRunsController(new DomesticCollectorStore(w.Rig.Database), w.Rig.Runs, StudioFakes.Unused<ICloroSettingsStore>(),
             StudioFakes.Unused<ICloroKeyPool>(), StudioFakes.Unused<IAnswerProviderSettingsStore>(), StudioFakes.Unused<IManagementStore>(),
-            new VisibilityRunQueryStore(w.Rig.Database), new TenantContextResolver(new DevelopmentEnvironment()), w.Rig.App)
+            new VisibilityRunQueryStore(w.Rig.Database), new TenantContextResolver(new DevelopmentEnvironment()), w.Rig.App,
+            new DevelopmentEnvironment(), StudioFakes.Unused<IResearchStore>())
             { ControllerContext = new ControllerContext { HttpContext = context } };
     }
 

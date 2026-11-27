@@ -102,7 +102,8 @@ public sealed partial class AppLeaseSqlTests
         await SetBindingAsync("cooldown_until = UTC_TIMESTAMP(6) - INTERVAL 1 SECOND");
         AssertEmpty(await LeaseAsync(doubao), AppLeaseEmptyReason.DeviceBusy, 100, 120);
         Assert.Equal("active|-|0|0", await pool.BindingAsync(doubao));
-        Assert.Equal(["binding_registered", "cooldown_expired"], await pool.EventsAsync(doubao));
+        // binding_resumed is the operator's approval of the new binding (Pool.BindAsync).
+        Assert.Equal(["binding_registered", "binding_resumed", "cooldown_expired"], await pool.EventsAsync(doubao));
 
         // Leasing is not sending: clearing the lease does not start a question cooldown.
         await pool.FinishAsync(first);

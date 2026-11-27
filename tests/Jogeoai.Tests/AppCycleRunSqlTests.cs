@@ -123,7 +123,7 @@ public sealed partial class AppCycleRunSqlTests
         await ExecAsync(rig.Cs, "UPDATE collection_schedules SET next_slot_at = @at WHERE id = UUID_TO_BIN(@id);",
             ("@id", schedule.ToString()), ("@at", $"2000-01-{day:00} 01:11:00"));
         Assert.Equal(1, await rig.Schedules.MaterializeDueSlotsAsync(Utc(day, 1, 12), 1));
-        return (await rig.Schedules.GetPendingSlotsAsync(100)).SingleOrDefault(slot => slot.ScheduleId == schedule);
+        return ((await rig.Schedules.GetPendingSlotsAsync(100)).Regular()).SingleOrDefault(slot => slot.ScheduleId == schedule);
     }
 
     /// <summary>物化并处理一个到期时隙；返回处理后的时隙行。</summary>

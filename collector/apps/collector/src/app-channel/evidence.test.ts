@@ -26,6 +26,7 @@ import {
   ANSWER_ID,
   DEVICE_A,
   DEVICE_B,
+  SHA,
   evidenceDirectory,
   recordFixture,
 } from "./test-fixtures.ts";
@@ -181,7 +182,8 @@ describe("record schema", () => {
   it("has exactly the designed fields and requires each of them", () => {
     // Optional: the reason a record's evidence is unusable, and how the sources of a collected
     // answer were read (absent on failures and on records written before v1.1), list by list
-    // where the contract declares several source lists; the leased task of a control_plane record.
+    // where the contract declares several source lists; the leased task of a control_plane record;
+    // the screen where a read of links stopped because its list did not move.
     expect(Object.keys(appRecordSchema.shape).sort()).toEqual(
       [
         ...fields,
@@ -190,6 +192,7 @@ describe("record schema", () => {
         "citationsIssue",
         "citationLists",
         "task",
+        "linkStop",
       ].sort(),
     );
     // A control_plane record names its task; a local trial record never does.
@@ -581,6 +584,77 @@ describe("record schema", () => {
     expect(
       appRecordSchema.safeParse({ ...record, citations: [{ title: "只有标题" }] }).success,
     ).toBe(false);
+  });
+  // Task 11-24: the link read by opening each source.
+  it("keeps the copied link next to the restored address, or the cause of a missing one", async () => {
+    const copied = "https://example.com/p?id=1&theme=light";
+    const record = recordFixture({
+      video: null,
+      citations: [
+        {
+          title: "合成来源一",
+          site: null,
+          url: "https://example.com/p?id=1",
+          link: { copied, restored: true },
+        },
+        {
+          title: "合成来源二",
+          site: null,
+          url: "https://link.example.cn/x",
+          link: { copied: "https://link.example.cn/x", restored: false },
+        },
+        { title: "合成来源三", site: null, url: null, link: { issue: "page_not_opened" } },
+      ],
+      citationsStatus: "read",
+    });
+    expect(appRecordSchema.safeParse(record).success).toBe(true);
+    const store = await openStore();
+    await store.writeRecord(record);
+    expect(await store.readRecords("batch-1")).toEqual([record]);
+
+    const source = (citation: Record<string, unknown>) =>
+      appRecordSchema.safeParse(
+        recordFixture({ citations: [{ title: "合成来源", site: null, ...citation } as never] }),
+      ).success;
+    // A copied link is the source's url, restored or as it is.
+    expect(source({ url: null, link: { copied, restored: true } })).toBe(false);
+    expect(source({ url: "https://example.com/other", link: { copied, restored: false } })).toBe(
+      false,
+    );
+    // Fixed cause words only, and one of the two forms.
+    expect(source({ url: null, link: { issue: "time_budget" } })).toBe(true);
+    expect(source({ url: null, link: { issue: "合成原因" } })).toBe(false);
+    expect(source({ url: null, link: { issue: "time_budget", copied } })).toBe(false);
+    expect(source({ url: copied, link: { copied, restored: false, title: "x" } })).toBe(false);
+    expect(source({ url: copied, link: { copied: "", restored: false } })).toBe(false);
+  });
+  // Task 11-24 §12.2.
+  it("keeps the screen at a stop of the link read, part by part, and reads records without it", () => {
+    const evidence = { file: "links-stop.png", sha256: SHA, bytes: 10 };
+    const xml = { file: "links-stop.xml", sha256: SHA, bytes: 20 };
+    for (const linkStop of [
+      { screenshot: evidence, hierarchy: xml },
+      { screenshot: null, hierarchy: xml },
+      { screenshot: null, hierarchy: null },
+    ])
+      expect(appRecordSchema.safeParse(recordFixture({ linkStop })).success).toBe(true);
+    expect(recordFixture()).not.toHaveProperty("linkStop");
+    expect(appRecordSchema.safeParse(recordFixture()).success).toBe(true);
+    // Strict: both parts named, nothing else.
+    for (const linkStop of [
+      { screenshot: evidence },
+      { screenshot: evidence, hierarchy: xml, note: "x" },
+      { screenshot: { file: "links-stop.png" }, hierarchy: null },
+    ])
+      expect(
+        appRecordSchema.safeParse({ ...recordFixture(), linkStop }).success,
+        JSON.stringify(linkStop),
+      ).toBe(false);
+  });
+  it("still reads a source without a link, as written before links were read", () => {
+    const record = recordFixture();
+    expect(record.citations[0]).not.toHaveProperty("link");
+    expect(appRecordSchema.parse(record)).toEqual(record);
   });
 });
 

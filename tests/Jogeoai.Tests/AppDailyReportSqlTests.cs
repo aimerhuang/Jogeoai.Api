@@ -17,7 +17,7 @@ using static Jogeoai.Tests.AppLeaseSqlTests;
 namespace Jogeoai.Tests;
 
 /// <summary>
-/// 隔离库（已执行 001–049、库名含 _test）上的每日告警汇报（implement 8.4 / 8.5）：内容与运营接口的告警视图一致；节点失联超过 15 分钟出现在
+/// 隔离库（已执行 001–052、库名含 _test）上的每日告警汇报（implement 8.4 / 8.5）：内容与运营接口的告警视图一致；节点失联超过 15 分钟出现在
 /// 下一份汇报里；没有告警的日子也有一份；同一天重复运行（含 Worker 重启）只有一份；汇报里没有提问原文、租户名称和品牌名称。
 /// 未设置 JOGEOAI_APP_CHANNEL_TEST_CONNECTION 时跳过。汇报用远在未来的日期作为键（日期只是键，内容按数据库的当前时间计算），
 /// 用例前后删除它用过的日期；其余行由 PoolAsync 清理并核对整库行数。时间推进靠改写数据库时间戳，不用 sleep。
@@ -84,11 +84,17 @@ public sealed class AppDailyReportSqlTests
         StoppedBindings = view.StoppedBindings.Select(binding => binding with { StoppedSeconds = 0 }).ToArray(),
     }, ApiJson);
 
+    // An approved binding that then reports a stop reason of its own. Since migration 052 a new binding waits for approval
+    // whatever health it reports, so it is registered and approved first (Pool.BindAsync) and reports the reason afterwards.
     internal static async Task<Guid> BindStoppedAsync(AppLeaseSqlTests.Pool pool, string node, string device, string platform, string health)
     {
+        var label = $"{platform}-{Guid.NewGuid():N}";
+        var binding = await pool.BindAsync(node, device, platform, label);
         var result = await pool.Store().ReportBindingsAsync(new AppBindingReportCommand(node, "test-rev",
-            [new AppBindingReport(device, platform, $"{platform}-{Guid.NewGuid():N}", $"pkg.{platform}", "1.0", "1.0", "15", health)]));
-        return Assert.Single(result.Bindings).BindingId;
+            [new AppBindingReport(device, platform, label, $"pkg.{platform}", "1.0", "1.0", "15", health)]));
+        var state = Assert.Single(result.Bindings);
+        Assert.Equal((binding, AppBindingStatus.Stopped), (state.BindingId, state.Status));
+        return binding;
     }
 
     [AppChannelMySqlFact]
@@ -140,6 +146,60 @@ public sealed class AppDailyReportSqlTests
             Assert.Equal(1, await ReportsOnAsync(pool.Cs, dates[0]));
         }));
 
+    // Migration 052, RF5: a binding waiting for the operator's approval is its own alert category. It is stored as stopped /
+    // disabled_by_operator, like a binding the operator disabled, but it is not listed among the stopped bindings.
+    [AppChannelMySqlFact]
+    public Task BindingsWaitingForApprovalAreListedOnTheirOwnAndNotAmongTheStoppedBindings() => PoolAsync(async (pool, _) =>
+        await WithDatesAsync(pool.Cs, 1, async dates =>
+        {
+            var ops = BuildOps(pool);
+            var (node, _) = await pool.NodeAsync("mac");
+            var working = await pool.BindAsync(node, "AVD_A", "doubao");
+            var label = $"doubao-{Guid.NewGuid():N}";
+            var pending = await pool.BindAsync(node, "AVD_B", "doubao", label, approve: false);
+            var disabled = await pool.BindAsync(node, "AVD_A", "kimi");
+            Assert.True(await ops.Pool.DisableBindingAsync(disabled, ops.UserId));
+
+            var view = Ok(await ops.Controller.Alerts(default));
+            var waiting = Assert.Single(view.PendingApprovalBindings);
+            Assert.Equal((pending, node, "AVD_B", "doubao", label), (waiting.BindingId, waiting.NodeId, waiting.DeviceId, waiting.PlatformCode, waiting.AccountLabel));
+            Assert.InRange(waiting.RegisteredAt, DateTimeOffset.UtcNow.AddMinutes(-1), DateTimeOffset.UtcNow.AddMinutes(1));
+            var stopped = Assert.Single(view.StoppedBindings);
+            Assert.Equal((disabled, AppBindingStopReason.DisabledByOperator), (stopped.BindingId, stopped.StopReason));
+            Assert.True(view.HasAlerts);
+            Assert.Contains("\"pendingApprovalBindings\":[{", JsonSerializer.Serialize(view, ApiJson));
+
+            // The operator's lists: the pending binding and the disabled one have the same status and reason; approvalPending
+            // tells them apart.
+            var bindings = Ok(await ops.Controller.ListBindings(node, null, null, default)).ToDictionary(item => item.Id);
+            Assert.Equal((AppBindingStatus.Stopped, (AppBindingStopReason?)AppBindingStopReason.DisabledByOperator, true, (DateTimeOffset?)null),
+                (bindings[pending].Status, bindings[pending].StopReason, bindings[pending].ApprovalPending, bindings[pending].ApprovedAt));
+            Assert.Equal((AppBindingStatus.Stopped, (AppBindingStopReason?)AppBindingStopReason.DisabledByOperator, false),
+                (bindings[disabled].Status, bindings[disabled].StopReason, bindings[disabled].ApprovalPending));
+            Assert.Equal((AppBindingStatus.Active, false), (bindings[working].Status, bindings[working].ApprovalPending));
+            Assert.NotNull(bindings[disabled].ApprovedAt);
+            Assert.NotNull(bindings[working].ApprovedAt);
+            var listed = Assert.Single(Ok(await ops.Controller.ListNodes(default)), item => item.NodeId == node);
+            Assert.Equal((3, 1), (listed.Bindings, listed.ActiveBindings));
+
+            // The daily report has the same content, with its own section and its own count in the conclusion.
+            var report = (await ops.Reports.GenerateAsync(dates[0])).Report;
+            Assert.Equal(Comparable(view), Comparable(report.Alerts));
+            Assert.True(report.HasAlerts);
+            var body = report.Body.ReplaceLineEndings("\n");
+            Assert.Contains("停止的绑定 1 条", body);
+            Assert.Contains("待批准的绑定 1 条", body);
+            Assert.Contains("八、待批准的绑定", body);
+            Assert.Contains($"  - {node} / AVD_B / ", body);
+            Assert.Contains($" / {label}：登记于 ", body);
+
+            // Approved through the resume route: it leaves the category and does not become a stopped binding.
+            Assert.True(Ok(await ops.Controller.ResumeBinding(pending, default)).Changed);
+            var after = await ops.Alerts.GetAlertsAsync();
+            Assert.Empty(after.PendingApprovalBindings);
+            Assert.Equal(disabled, Assert.Single(after.StoppedBindings).BindingId);
+        }));
+
     // There is no automatic breaker for repeated failures: a binding whose last three attempts all failed before the send is
     // listed in the alert view, and that is all. Nothing is stopped or paused; a send takes it off the list.
     [AppChannelMySqlFact]
@@ -180,7 +240,8 @@ public sealed class AppDailyReportSqlTests
         Assert.Equal("active|-|0|0", await pool.BindingAsync(binding));
         Assert.Empty(view.StoppedBindings);
         Assert.Empty(view.Platforms);
-        Assert.Equal(["binding_registered", "failure_reported", "failure_reported", "failure_reported"], await pool.EventsAsync(binding));
+        // binding_resumed is the operator's approval of the new binding (Pool.BindAsync).
+        Assert.Equal(["binding_registered", "binding_resumed", "failure_reported", "failure_reported", "failure_reported"], await pool.EventsAsync(binding));
 
         // The next attempt is in flight and has not sent yet: it has no verdict, so the binding stays listed.
         var fourth = (await ops.Pool.LeaseAsync(new AppLeaseCommand(node, binding, 120))).Task!;

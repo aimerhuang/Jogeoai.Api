@@ -99,7 +99,7 @@ public sealed class GeminiAnswerPersistenceSqlTests
         Assert.Equal("CONFIG_VERSION_CONFLICT", (await Assert.ThrowsAsync<CollectorStoreException>(() =>
             f.Management.PutSiteTargetsAsync(f.Tenant, f.Site, new(oldVersion, [Fixture.ChatGpt, f.AddedTarget])))).Code);
         var selection = new CollectionScheduleSelection([f.Prompt], [Fixture.ChatGptTarget]);
-        var auto = await f.Schedules.CreateAsync(new(f.Tenant, f.Site, PromptMonitoringIdentity.ScheduleName, "daily", null, "09:00", "UTC", selection, true));
+        var auto = await f.Schedules.CreateAutomaticPlanAsync(new(f.Tenant, f.Site, PromptMonitoringIdentity.ScheduleName, "daily", null, "09:00", "UTC", selection, true));
         var custom = await f.Schedules.CreateAsync(new(f.Tenant, f.Site, "custom", "daily", null, "09:00", "UTC", selection, true));
         var paused = await f.Schedules.CreateAsync(new(f.Tenant, f.Site, "paused-custom", "daily", null, "09:00", "UTC", selection, false));
         targets = await f.Management.GetSiteTargetsAsync(f.Tenant, f.Site);
@@ -141,7 +141,7 @@ public sealed class GeminiAnswerPersistenceSqlTests
     public async Task BusyMonitoringInitializationYieldsPendingSlotThenContinuesAfterRelease(string engine)
     {
         var f = await Fixture.Create(engine);
-        var auto = await f.Schedules.CreateAsync(new(f.Tenant, f.Site, PromptMonitoringIdentity.ScheduleName,
+        var auto = await f.Schedules.CreateAutomaticPlanAsync(new(f.Tenant, f.Site, PromptMonitoringIdentity.ScheduleName,
             "daily", null, "09:00", "UTC", new([f.Prompt], [Fixture.ChatGptTarget]), true));
         await f.Exec("UPDATE collection_schedules SET next_slot_at=@due WHERE id=UUID_TO_BIN(@id);",
             ("@due", DateTime.UtcNow.Date.AddDays(-1).AddHours(9)), ("@id", auto.Id));
@@ -180,7 +180,7 @@ public sealed class GeminiAnswerPersistenceSqlTests
     public async Task EmptyAutomaticSelectionCreatesOnlySkippedSlotAndPreservesPause(string engine)
     {
         var f = await Fixture.Create(engine);
-        var auto = await f.Schedules.CreateAsync(new(f.Tenant, f.Site, PromptMonitoringIdentity.ScheduleName,
+        var auto = await f.Schedules.CreateAutomaticPlanAsync(new(f.Tenant, f.Site, PromptMonitoringIdentity.ScheduleName,
             "daily", null, "09:00", "UTC", new([f.Prompt], [Fixture.ChatGptTarget]), true));
         await f.Exec("UPDATE prompts SET enabled=FALSE WHERE id=UUID_TO_BIN(@id);", ("@id", f.Prompt));
         await f.Exec("UPDATE collection_schedules SET next_slot_at=@due WHERE id=UUID_TO_BIN(@id);",
@@ -203,7 +203,7 @@ public sealed class GeminiAnswerPersistenceSqlTests
     {
         var f = await Fixture.Create(engine);
         await f.Exec("UPDATE site_targets SET monitoring_enabled_at=NULL WHERE site_id=UUID_TO_BIN(@id);", ("@id", f.Site));
-        var auto = await f.Schedules.CreateAsync(new(f.Tenant, f.Site, PromptMonitoringIdentity.ScheduleName,
+        var auto = await f.Schedules.CreateAutomaticPlanAsync(new(f.Tenant, f.Site, PromptMonitoringIdentity.ScheduleName,
             "daily", null, "09:00", "UTC", new([f.Prompt], [Fixture.ChatGptTarget]), false));
         var before = DateTime.UtcNow.AddSeconds(-1);
         await AutomaticMonitoringSelection.ReconcileAsync(f.Database, f.Tenant, f.Site, default);
@@ -290,7 +290,7 @@ public sealed class GeminiAnswerPersistenceSqlTests
         var disabled = await f.Management.CreatePromptAsync(f.Tenant, f.Site, new("停用问题", Enabled: false));
         var targets = await f.Management.GetSiteTargetsAsync(f.Tenant, f.Site);
         await f.Management.PutSiteTargetsAsync(f.Tenant, f.Site, new(targets.ConfigVersion, [f.AddedTarget]));
-        var auto = await f.Schedules.CreateAsync(new(f.Tenant, f.Site, PromptMonitoringIdentity.ScheduleName,
+        var auto = await f.Schedules.CreateAutomaticPlanAsync(new(f.Tenant, f.Site, PromptMonitoringIdentity.ScheduleName,
             "daily", null, "09:00", "UTC", new([f.Prompt], f.RunCommand().Targets), true));
         var due = DateTimeOffset.UtcNow.AddDays(1).Date.AddHours(9);
         await f.Exec("UPDATE collection_schedules SET next_slot_at=@due WHERE id=UUID_TO_BIN(@id);", ("@due", due), ("@id", auto.Id));

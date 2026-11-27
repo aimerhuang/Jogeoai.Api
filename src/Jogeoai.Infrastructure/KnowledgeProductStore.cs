@@ -15,6 +15,9 @@ public sealed class KnowledgeProductStore(MySqlDatabase database, IKnowledgeStor
     public const int DailyParseLimit = KnowledgeProductRules.DailyParseLimit;
     /// <summary>识别任务最大尝试次数。</summary>
     public const int MaxAttempts = 3;
+    /// <summary>租约多次过期后在领取时放弃任务所写入的错误码。</summary>
+    public const string ParseInterruptedCode = "PRODUCT_PARSE_INTERRUPTED";
+    private const string ParseInterruptedMessage = "识别多次中断，请重新发起。";
 
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
     private static readonly HashSet<string> SourceKinds = ["manual", "file", "url", "completion"];
@@ -376,7 +379,7 @@ public sealed class KnowledgeProductStore(MySqlDatabase database, IKnowledgeStor
         await using var command = new MySqlCommand("""
             SELECT BIN_TO_UUID(j.id), BIN_TO_UUID(j.tenant_id), BIN_TO_UUID(j.site_id), BIN_TO_UUID(j.product_id), j.job_kind,
                    BIN_TO_UUID(j.source_document_id), BIN_TO_UUID(j.source_version_id), v.object_key, v.extension,
-                   BIN_TO_UUID(j.requested_by), j.attempt_count
+                   BIN_TO_UUID(j.requested_by), j.attempt_count, j.status
             FROM knowledge_product_parse_jobs j
             JOIN knowledge_products p ON p.tenant_id=j.tenant_id AND p.id=j.product_id
             LEFT JOIN knowledge_document_versions v ON v.tenant_id=j.tenant_id AND v.id=j.source_version_id
@@ -387,16 +390,37 @@ public sealed class KnowledgeProductStore(MySqlDatabase database, IKnowledgeStor
             LIMIT 1 FOR UPDATE OF j SKIP LOCKED;
             """, connection, transaction);
         ProductParseJobLease? job = null;
+        var status = string.Empty;
         await using (var reader = await command.ExecuteReaderAsync(cancellationToken))
         {
             if (await reader.ReadAsync(cancellationToken))
+            {
                 job = new ProductParseJobLease(Guid.Parse(reader.GetString(0)), Guid.Parse(reader.GetString(1)), Guid.Parse(reader.GetString(2)),
                     Guid.Parse(reader.GetString(3)), ParseKind(reader.GetString(4)),
                     reader.IsDBNull(5) ? null : Guid.Parse(reader.GetString(5)), reader.IsDBNull(6) ? null : Guid.Parse(reader.GetString(6)),
                     reader.IsDBNull(7) ? null : reader.GetString(7), reader.IsDBNull(8) ? null : reader.GetString(8),
                     Guid.Parse(reader.GetString(9)), reader.GetInt32(10), workerId);
+                status = reader.GetString(11);
+            }
         }
         if (job is null) { await transaction.RollbackAsync(CancellationToken.None); return null; }
+        // 此处的 AttemptCount 是库里的值（本次领取尚未加一），即已经开始过的执行次数。
+        if (status == "running" && job.AttemptCount >= MaxAttempts)
+        {
+            // running 且被选中说明租约已过期（Worker 被杀或心跳中断）。次数用尽后在同一事务内记为失败并让出队列，
+            // 否则重启后的 Worker 会无限重领同一个任务。与 FailParseAsync 的失败分支写同一组状态，不带租约持有者条件；
+            // active_key 是按 status 生成的列，任务失败后自动变为 NULL，产品可以再次发起识别。
+            await ExecuteAsync(connection, transaction, """
+                UPDATE knowledge_product_parse_jobs SET status='failed', error_code=@code, error_message=@message,
+                    lease_owner=NULL, lease_until=NULL, completed_at=UTC_TIMESTAMP(6), updated_at=UTC_TIMESTAMP(6)
+                WHERE tenant_id=UUID_TO_BIN(@tenant) AND id=UUID_TO_BIN(@job) AND status='running';
+                UPDATE knowledge_products SET status='parse_failed', updated_at=UTC_TIMESTAMP(6)
+                WHERE tenant_id=UUID_TO_BIN(@tenant) AND id=UUID_TO_BIN(@product) AND status='parsing';
+                """, cancellationToken, ("@code", ParseInterruptedCode), ("@message", ParseInterruptedMessage),
+                ("@tenant", job.TenantId.ToString()), ("@job", job.JobId.ToString()), ("@product", job.ProductId.ToString()));
+            await transaction.CommitAsync(cancellationToken);
+            return null;
+        }
         await ExecuteAsync(connection, transaction, """
             UPDATE knowledge_product_parse_jobs SET status='running', lease_owner=@owner,
                 lease_until=DATE_ADD(UTC_TIMESTAMP(6), INTERVAL @seconds SECOND), attempt_count=attempt_count+1,

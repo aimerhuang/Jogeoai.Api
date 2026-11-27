@@ -475,6 +475,33 @@ describe("batch scheduling", () => {
     expect(s.logs.map((line) => line.event)).toContain("app_batch_stopping");
   });
 
+  // Task 11-24: work that can be cut short (reading links) ends before the grace period does.
+  it("tells attempts in flight of a stop request at once, before their own signal aborts", async () => {
+    const stop = new AbortController();
+    const requests: AttemptRequest[] = [];
+    const s = scenario((request, number) => {
+      requests.push(request);
+      if (number === 2) stop.abort();
+      return {};
+    });
+    await s.run({ stop: stop.signal });
+    expect(requests).toHaveLength(2);
+    for (const request of requests) {
+      expect(request.stopping).toBe(stop.signal);
+      expect(request.stopping?.aborted).toBe(true);
+    }
+    // The grace period did not end: the attempts finished with their own signal untouched.
+    expect(s.attempts.every((attempt) => !attempt.aborted)).toBe(true);
+    // Without a stop signal there is nothing to pass on.
+    requests.length = 0;
+    const unstoppable = scenario((request) => {
+      requests.push(request);
+      return {};
+    });
+    await unstoppable.run({ limit: 1 });
+    expect(requests[0]!.stopping).toBeUndefined();
+  });
+
   it("aborts attempts still in flight when the grace period ends, and they end with an outcome", async () => {
     const stop = new AbortController();
     const s = scenario((request, number) => {

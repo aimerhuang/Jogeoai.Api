@@ -26,12 +26,12 @@ public sealed class AppCollectorAdminController(IAppCollectorPoolStore pool, IAp
 {
     // ---------------- 节点 ----------------
 
-    /// <summary>列出全部 App 采集节点：状态、最近出现时间、是否失联（超过 15 分钟没有出现）、绑定数。不返回令牌。</summary>
+    /// <summary>列出全部 App 采集节点：状态、最近出现时间、是否失联（超过 15 分钟没有出现）、绑定数、设备上限。不返回令牌。</summary>
     /// <param name="cancellationToken">取消令牌。</param>
     /// <response code="200">节点列表，按节点标识排序。</response>
     /// <response code="401">未登录（AUTHENTICATION_REQUIRED）。</response>
     /// <response code="403">不是系统管理员（ADMIN_REQUIRED）。</response>
-    /// <response code="503">迁移 049 未部署（APP_CHANNEL_SCHEMA_NOT_MIGRATED）。</response>
+    /// <response code="503">迁移 049 或 052 未部署（APP_CHANNEL_SCHEMA_NOT_MIGRATED）。</response>
     [HttpGet("nodes")]
     [ProducesResponseType(typeof(IReadOnlyList<AppNodeView>), StatusCodes.Status200OK)]
     [ProducesResponseType(typeof(MonitoringAnswerErrorResponse), StatusCodes.Status401Unauthorized)]
@@ -106,6 +106,39 @@ public sealed class AppCollectorAdminController(IAppCollectorPoolStore pool, IAp
     public Task<ActionResult<AppNodeChange>> ResumeNode(string nodeId, CancellationToken cancellationToken)
         => RunAsync(() => SetNodeStatusAsync(nodeId, AppNodeStatus.Active, cancellationToken), cancellationToken);
 
+    /// <summary>
+    /// 设置节点可登记的不同设备（AVD）数上限，默认 4。节点上报的绑定里，超出上限的新设备会被拒绝（device_limit_exceeded）且不入库；
+    /// 已登记设备的绑定不受影响。不能调到低于该节点已登记的设备数。与现值相同时不做修改。
+    /// </summary>
+    /// <param name="nodeId">节点标识。</param>
+    /// <param name="request">新的设备上限。</param>
+    /// <param name="cancellationToken">取消令牌。</param>
+    /// <response code="200">是否发生了变化，以及操作之后的节点。</response>
+    /// <response code="400">maxDevices 缺失或不在 1–64 之间（INVALID_APP_LIMITS）。</response>
+    /// <response code="401">未登录（AUTHENTICATION_REQUIRED）。</response>
+    /// <response code="403">不是系统管理员（ADMIN_REQUIRED）。</response>
+    /// <response code="404">节点不存在（APP_NODE_NOT_FOUND）。</response>
+    /// <response code="409">新的上限低于该节点已登记的设备数（APP_NODE_MAX_DEVICES_BELOW_REGISTERED）。</response>
+    /// <response code="503">迁移 049 或 052 未部署（APP_CHANNEL_SCHEMA_NOT_MIGRATED）。</response>
+    [HttpPut("nodes/{nodeId}/max-devices")]
+    [ProducesResponseType(typeof(AppNodeChange), StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(MonitoringAnswerErrorResponse), StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(typeof(MonitoringAnswerErrorResponse), StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType(typeof(MonitoringAnswerErrorResponse), StatusCodes.Status403Forbidden)]
+    [ProducesResponseType(typeof(MonitoringAnswerErrorResponse), StatusCodes.Status404NotFound)]
+    [ProducesResponseType(typeof(MonitoringAnswerErrorResponse), StatusCodes.Status409Conflict)]
+    [ProducesResponseType(typeof(MonitoringAnswerErrorResponse), StatusCodes.Status503ServiceUnavailable)]
+    public Task<ActionResult<AppNodeChange>> SetNodeMaxDevices(string nodeId, [FromBody] AppNodeMaxDevicesRequest request,
+        CancellationToken cancellationToken)
+        => RunAsync(async () =>
+        {
+            // Checked here, before any store call; the store checks the same range again.
+            if (request?.MaxDevices is not { } maxDevices || !AppAdminRules.MaxDevicesValid(maxDevices))
+                throw new CollectorStoreException("INVALID_APP_LIMITS", $"maxDevices 必填，且必须在 1–{AppPoolRules.MaxDevicesPerNodeLimit} 之间。", 400);
+            return new AppNodeChange(await admin.SetNodeMaxDevicesAsync(nodeId, maxDevices, OperatorId(), cancellationToken),
+                await admin.GetNodeAsync(nodeId, cancellationToken));
+        }, cancellationToken);
+
     private async Task<AppNodeChange> SetNodeStatusAsync(string nodeId, AppNodeStatus status, CancellationToken cancellationToken)
     {
         var before = await admin.GetNodeAsync(nodeId, cancellationToken);
@@ -116,7 +149,8 @@ public sealed class AppCollectorAdminController(IAppCollectorPoolStore pool, IAp
     // ---------------- 绑定 ----------------
 
     /// <summary>
-    /// 列出绑定：状态、停止原因与停止时长、冷却、是否离线、最近出现 / 领取 / 成功时间、领取间隔和每日上限。账号只以代号出现。
+    /// 列出绑定：状态、停止原因与停止时长、是否待批准与批准时间、冷却、是否离线、最近出现 / 领取 / 成功时间、领取间隔和每日上限。账号只以代号出现。
+    /// 采集节点新登记的绑定是待批准（approvalPending 为 true，状态 stopped、原因 disabled_by_operator），调用恢复接口批准后才能领取任务。
     /// </summary>
     /// <param name="nodeId">可选，只看该节点的绑定。</param>
     /// <param name="platformCode">可选，只看该平台的绑定，例如 doubao。</param>
@@ -165,6 +199,8 @@ public sealed class AppCollectorAdminController(IAppCollectorPoolStore pool, IAp
     /// <summary>
     /// 恢复一个已停止的绑定（任何停止原因，包括需要登录、需要人工验证、App 拒绝模拟器和运营停用）。冷却不受影响；
     /// 平台被判定不可用的 App 入口不会随之恢复，需要另外调用恢复入口。先确认账号已在模拟器内由授权人员处理好。
+    /// 这个接口同时是批准：采集节点新登记的绑定在这里第一次恢复时记下批准时间，之后才能领取任务；
+    /// 批准前先核对节点、设备和账号代号确实是自己接入的。已批准的绑定再次停用、恢复，批准时间不变。
     /// </summary>
     /// <param name="bindingId">绑定标识。</param>
     /// <param name="cancellationToken">取消令牌。</param>
@@ -526,6 +562,10 @@ public sealed class AppCollectorAdminController(IAppCollectorPoolStore pool, IAp
 /// <summary>登记 App 采集节点的请求。</summary>
 /// <param name="NodeId">节点标识，1–128 个字符，例如 mac-mini-01；登记后不能修改。</param>
 public sealed record RegisterAppNodeRequest(string? NodeId);
+
+/// <summary>设置节点设备上限的请求。</summary>
+/// <param name="MaxDevices">必填，该节点可登记的不同设备（AVD）数上限，1–64；不能低于该节点已登记的设备数。</param>
+public sealed record AppNodeMaxDevicesRequest(int? MaxDevices);
 
 /// <summary>设置绑定限速的请求；两个值整体替换。</summary>
 /// <param name="MinIntervalSeconds">必填，两次领取的最小间隔秒数（60–86400），默认值是 100（迁移 050）。</param>

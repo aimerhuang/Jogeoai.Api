@@ -16,6 +16,7 @@ import {
   bindingsFixture,
   contractDirectory,
   iconAppContract,
+  linksContract,
   referenceContract,
 } from "./test-fixtures.ts";
 
@@ -327,6 +328,158 @@ describe("App screen contract schema", () => {
       accepts((citations) => {
         delete citations.via;
         citations.count = { from: "entry", pattern: "使用 (\\d+) 个工具" };
+      }),
+    ).toBe(true);
+  });
+  // Task 11-24: every source opened to read its link.
+  it("expresses reading every source's link through its page, with title selectors only", () => {
+    const accepts = (mutate: (contract: ReturnType<typeof linksContract>) => void = () => {}) => {
+      const contract = linksContract();
+      mutate(contract);
+      return appContractSchema.safeParse(contract).success;
+    };
+    const links = (value: Record<string, unknown>) =>
+      accepts((contract) => void Object.assign(contract.citations.links as object, value));
+    expect(accepts()).toBe(true);
+    // What is left out stays out: the flow supplies the default budget.
+    expect(sourcePaths(appContractSchema.parse(linksContract()))[0]!.links).toEqual({
+      page: { id: "com.larus.nova:id/bullet_container" },
+      share: { id: "com.larus.nova:id/btn_share" },
+      copy: { text: "复制链接" },
+      close: { back: true },
+      unwrap: [{ host: "link.wtturl.cn", param: "target" }],
+      dropParams: ["use_xbridge3", "loader_name", "need_sec_link", "sec_link_scene", "theme"],
+      systemShare: {
+        package: "com.android.intentresolver",
+        copy: { id: "com.android.intentresolver:id/copy" },
+      },
+    });
+    // Without links a path is what it was.
+    expect(sourcePaths(parsed())[0]).not.toHaveProperty("links");
+
+    // Page, share, copy and a way out are required; restoration rules are not.
+    for (const key of ["page", "share", "copy", "close"])
+      expect(
+        accepts(
+          (contract) => void delete (contract.citations.links as Record<string, unknown>)[key],
+        ),
+      ).toBe(false);
+    expect(
+      accepts((contract) => {
+        const value = contract.citations.links as Record<string, unknown>;
+        delete value.unwrap;
+        delete value.dropParams;
+      }),
+    ).toBe(true);
+    expect(links({ close: { desc: "关闭" } })).toBe(true);
+    expect(links({ close: { back: false } })).toBe(false);
+    expect(links({ page: {} })).toBe(false);
+    expect(links({ scroll: true })).toBe(false);
+
+    // Budget: 30 to 600 whole seconds.
+    expect(links({ budgetSeconds: 30 })).toBe(true);
+    expect(links({ budgetSeconds: 600 })).toBe(true);
+    expect(links({ budgetSeconds: 29 })).toBe(false);
+    expect(links({ budgetSeconds: 601 })).toBe(false);
+    expect(links({ budgetSeconds: 90.5 })).toBe(false);
+
+    // Host names in lower case, parameter names of letters, digits and `_.-`.
+    const unwrap = (host: string, param = "target") => links({ unwrap: [{ host, param }] });
+    expect(unwrap("link.example.cn")).toBe(true);
+    expect(unwrap("a-b.example.cn", "t_1.x-y")).toBe(true);
+    for (const host of [
+      "Link.Example.cn",
+      "example",
+      "https://link.example.cn",
+      "link.example.cn/",
+      "-a.example.cn",
+      "a..example.cn",
+      "例子.cn",
+      "",
+    ])
+      expect(unwrap(host)).toBe(false);
+    for (const param of ["", "a b", "a=b", "a&b", "目标", "x".repeat(65)])
+      expect(unwrap("link.example.cn", param)).toBe(false);
+    expect(links({ unwrap: [{ host: "link.example.cn" }] })).toBe(false);
+    expect(links({ unwrap: [{ host: "link.example.cn", param: "target", extra: 1 }] })).toBe(false);
+    expect(
+      links({
+        unwrap: Array.from({ length: 6 }, (_, index) => ({
+          host: `l${index}.example.cn`,
+          param: "t",
+        })),
+      }),
+    ).toBe(false);
+    expect(links({ dropParams: ["theme", "x".repeat(64)] })).toBe(true);
+    expect(links({ dropParams: ["the me"] })).toBe(false);
+    expect(links({ dropParams: Array.from({ length: 21 }, (_, index) => `p${index}`) })).toBe(
+      false,
+    );
+
+    // Android's own share sheet (task 11-24 §11.1): a package name and its copy button, both
+    // required; optional as a whole.
+    const systemShare = (value: unknown) => links({ systemShare: value });
+    expect(
+      accepts(
+        (contract) => void delete (contract.citations.links as Record<string, unknown>).systemShare,
+      ),
+    ).toBe(true);
+    expect(systemShare({ package: "com.android.intentresolver", copy: { text: "复制" } })).toBe(
+      true,
+    );
+    for (const name of ["", "intentresolver", "com.android.", "1com.android.x", "com android.x"])
+      expect(systemShare({ package: name, copy: { id: "a:id/copy" } }), name).toBe(false);
+    expect(systemShare({ package: "com.android.intentresolver" })).toBe(false);
+    expect(systemShare({ copy: { id: "a:id/copy" } })).toBe(false);
+    expect(systemShare({ package: "com.android.intentresolver", copy: {} })).toBe(false);
+    expect(
+      systemShare({
+        package: "com.android.intentresolver",
+        copy: { id: "a" },
+        preview: { id: "b" },
+      }),
+    ).toBe(false);
+
+    // Not with source cards, and not behind a screen in between.
+    const withCards = appContractSchema.safeParse(
+      (() => {
+        const contract = linksContract();
+        delete contract.citations.itemTitle;
+        delete contract.citations.searchQueries;
+        contract.citations.cards = { layout: [{ name: "title" }] };
+        return contract;
+      })(),
+    );
+    expect(withCards.success).toBe(false);
+    expect(withCards.error?.issues).toEqual([
+      expect.objectContaining({
+        path: ["citations", "links"],
+        message: "cannot be combined with cards",
+      }),
+    ]);
+    const withVia = appContractSchema.safeParse(
+      (() => {
+        const contract = linksContract();
+        contract.citations.via = {
+          panel: { text: "工具调用" },
+          item: { textContains: "搜索网页" },
+          close: { back: true },
+        };
+        return contract;
+      })(),
+    );
+    expect(withVia.success).toBe(false);
+    expect(withVia.error?.issues).toEqual([
+      expect.objectContaining({
+        path: ["citations", "links"],
+        message: "cannot be combined with via",
+      }),
+    ]);
+    // A path of several may read links as well.
+    expect(
+      accepts((contract) => {
+        const path = { ...contract.citations, label: "cited" };
+        contract.citations = [path, { ...referenceContract().citations, label: "other" }] as never;
       }),
     ).toBe(true);
   });

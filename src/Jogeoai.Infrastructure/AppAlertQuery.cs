@@ -6,7 +6,7 @@ using static Jogeoai.Infrastructure.DomesticCollectorStore;
 namespace Jogeoai.Infrastructure;
 
 /// <summary>
-/// App 渠道当前的告警信息（results.md 8.4）。运营接口的告警视图和 Worker 的每日汇报都调用这里，所以两者同源。
+/// App 渠道当前的告警信息（results.md 8.4，另加连续发题前失败的绑定与待批准的绑定）。运营接口的告警视图和 Worker 的每日汇报都调用这里，所以两者同源。
 /// 只读、不加锁。先从数据库取一次 UTC_TIMESTAMP(6) 作为数据截止时刻，之后的失联、停止时长和“过去 24 小时”都按它计算。
 /// 只读节点、绑定、平台、入口、采集任务、领取记录、设备尝试、审计事件和容量：不读提问、租户名称或品牌名称。
 /// 这里只报告，不停用绑定、不暂停平台、不改任何状态。
@@ -41,11 +41,14 @@ public sealed class AppAlertQuery(MySqlDatabase database, IAppCapacityQuery capa
                 """, ct, now))
             .Select(row => new AppOfflineNodeAlert(row[0], ParseIsoOrNull(row[1]), Long(row[2]))).ToArray();
 
-        // 2. Stopped bindings with their reason and how long they have been stopped.
+        // 2. Stopped bindings with their reason and how long they have been stopped. A binding waiting for the operator's
+        // approval (migration 052) is stored as stopped / disabled_by_operator; it is listed in its own category (8) and
+        // not here, so it is not counted twice. Before 052 there is no approval and every stopped binding is listed.
+        var approval = await AppChannelSchema.HasBindingApprovalAsync(c, null, ct);
         var stopped = (await QueryRowsAsync(c, null, $"""
                 SELECT BIN_TO_UUID(id), node_id, device_id, platform_code, account_label, stop_reason, {Iso("stopped_at")},
                        GREATEST(0, TIMESTAMPDIFF(SECOND, stopped_at, {Now}))
-                FROM collector_app_bindings WHERE status = 'stopped'
+                FROM collector_app_bindings WHERE status = 'stopped'{(approval ? " AND approved_at IS NOT NULL" : "")}
                 ORDER BY platform_code, node_id, device_id;
                 """, ct, now))
             .Select(row => AppContractNames.TryParse<AppBindingStopReason>(row[5], out var reason)
@@ -135,8 +138,19 @@ public sealed class AppAlertQuery(MySqlDatabase database, IAppCapacityQuery capa
             .OrderBy(alert => PlatformOrder(alert.PlatformCode)).ThenBy(alert => alert.NodeId, StringComparer.Ordinal)
             .ThenBy(alert => alert.DeviceId, StringComparer.Ordinal).ToArray();
 
-        return new AppAlertsView(ParseIso(clock[1]), AppDailyReportRules.HasAlerts(offline, stopped, platforms, notCollected, usage, preSend), offline,
-            stopped, platforms, notCollected, activity, usage) { PreSendFailures = preSend };
+        // 8. Bindings waiting for the operator's approval, by node. Their number is bounded by each node's device cap times
+        // the number of platforms; an unknown one may mean a leaked node token.
+        var pending = !approval ? [] : (await QueryRowsAsync(c, null, $"""
+                SELECT BIN_TO_UUID(id), node_id, device_id, platform_code, account_label, {Iso("created_at")}
+                FROM collector_app_bindings WHERE approved_at IS NULL
+                ORDER BY node_id, device_id, platform_code;
+                """, ct))
+            .Select(row => new AppPendingApprovalBindingAlert(Guid.Parse(row[0]), row[1], row[2], row[3], row[4], ParseIso(row[5])))
+            .OrderBy(alert => alert.NodeId, StringComparer.Ordinal).ThenBy(alert => alert.DeviceId, StringComparer.Ordinal)
+            .ThenBy(alert => PlatformOrder(alert.PlatformCode)).ToArray();
+
+        return new AppAlertsView(ParseIso(clock[1]), AppDailyReportRules.HasAlerts(offline, stopped, platforms, notCollected, usage, preSend, pending),
+            offline, stopped, platforms, notCollected, activity, usage) { PreSendFailures = preSend, PendingApprovalBindings = pending };
     }
 
     private static int IndexOf(IReadOnlyList<string> values, string value)

@@ -206,14 +206,15 @@ public sealed partial class AppSiteTargetsSqlTests
         Assert.Equal(others, await Resolve(new() { ["Collector:ChinaTenantIds:0"] = tenant.ToString() }).GetTargetCatalogAsync(tenantId: tenant));
     });
 
-    // 3.2 / 3.5: an App target is stored on its fixed surface; the anchor is tomorrow when newly enabled and survives a re-save.
+    // 3.2 / 3.5: an App target is stored on its fixed surface; the anchor is the enabling day (11-27-app-first-cycle-now: its first
+    // cycle starts at once through an instant slot) and survives a re-save.
     [AppChannelMySqlFact]
-    public Task PutStoresAppTargetsWithTomorrowAsAnchorAndAResaveKeepsIt() => IsolatedAsync(async (cs, seedTenant) =>
+    public Task PutStoresAppTargetsWithTodayAsAnchorAndAResaveKeepsIt() => IsolatedAsync(async (cs, seedTenant) =>
     {
         var tenant = await seedTenant();
         var site = await SeedBrandAsync(cs, tenant, "App 目标", follows: false, locale: "en-GB", created: "2026-05-01");
         var store = OpenStore(cs, tenant);
-        var (today, tomorrow) = (Day(Today()), Day(Today().AddDays(1)));
+        var today = Day(Today());
         var version = (await store.GetSiteTargetsAsync(tenant, site)).ConfigVersion;
         SiteTargetWrite[] targets = [ChatGpt with { Frequency = MonitoringFrequency.Weekly }, App("doubao"), App("kimi", enabled: false)];
 
@@ -221,16 +222,16 @@ public sealed partial class AppSiteTargetsSqlTests
         var rows = await TargetRowsAsync(cs, site);
         Assert.Equal(3, rows.Count);
         var doubao = rows[CollectionIdentity.AppTargetKey("doubao")];
-        Assert.Equal(new TargetRow("app_collector", "doubao", "app", "CN", "zh-CN", true, null, "weekly", tomorrow, true, doubao.UpdatedAt), doubao);
+        Assert.Equal(new TargetRow("app_collector", "doubao", "app", "CN", "zh-CN", true, null, "weekly", today, true, doubao.UpdatedAt), doubao);
         var kimi = rows[CollectionIdentity.AppTargetKey("kimi")];
         Assert.Equal(new TargetRow("app_collector", "kimi", "app", "CN", "zh-CN", false, null, "weekly", null, false, kimi.UpdatedAt), kimi);
-        // API targets keep today's anchor.
+        // API targets are anchored today as well.
         Assert.Equal(("weekly", today), (rows[ChatGptKey].Frequency, rows[ChatGptKey].Anchor));
 
         // The response lists the App rows after the other rows, with the three new fields.
         Assert.Equal(["cloro:chatgpt", "app_collector:doubao", "app_collector:kimi"], view.Items.Select(i => $"{i.Provider}:{i.Engine}"));
         var item = view.Items[1];
-        Assert.Equal((CollectionChannel.App, MonitoringFrequency.Weekly, MonitoringFrequency.Weekly, DateOnly.Parse(tomorrow), AnswerMode.Fast),
+        Assert.Equal((CollectionChannel.App, MonitoringFrequency.Weekly, MonitoringFrequency.Weekly, DateOnly.Parse(today), AnswerMode.Fast),
             (item.Channel!.Value, item.FixedFrequency!.Value, item.Frequency!.Value, item.FrequencyAnchor!.Value, item.AnswerMode!.Value));
         Assert.Equal(("豆包", "app", "CN", "zh-CN", true, "available", true, CollectionIdentity.AppTargetKey("doubao")),
             (item.DisplayName, item.CaptureMode, item.Country, item.Locale, item.Enabled, item.Availability, item.MonitoringEligible, item.TargetKey));
@@ -241,21 +242,21 @@ public sealed partial class AppSiteTargetsSqlTests
         Assert.Null(view.Items[0].FixedFrequency);
         Assert.Null(view.Items[0].UnavailableReason);
 
-        // Re-saving an enabled App target keeps its anchor; a target enabled by the same save gets tomorrow.
+        // Re-saving an enabled App target keeps its anchor; a target enabled by the same save gets today.
         await ExecAsync(cs, "UPDATE site_targets SET frequency_anchor = IF(provider = 'cloro', '2026-01-06', '2026-01-05') WHERE site_id = UUID_TO_BIN(@site) AND enabled = TRUE;",
             ("@site", site.ToString()));
         view = await store.PutSiteTargetsAsync(tenant, site, new SiteTargetsWrite(view.ConfigVersion, [targets[0], App("doubao"), App("kimi")]), markIndividual: true);
         rows = await TargetRowsAsync(cs, site);
-        Assert.Equal(("2026-01-05", tomorrow, "2026-01-06"),
+        Assert.Equal(("2026-01-05", today, "2026-01-06"),
             (rows[CollectionIdentity.AppTargetKey("doubao")].Anchor, rows[CollectionIdentity.AppTargetKey("kimi")].Anchor, rows[ChatGptKey].Anchor));
 
-        // Disabling keeps the stored anchor; enabling again starts a new cycle tomorrow.
+        // Disabling keeps the stored anchor; enabling again starts a new cycle today.
         view = await store.PutSiteTargetsAsync(tenant, site, new SiteTargetsWrite(view.ConfigVersion, [targets[0], App("doubao", enabled: false), App("kimi")]), markIndividual: true);
         var disabled = (await TargetRowsAsync(cs, site))[CollectionIdentity.AppTargetKey("doubao")];
         Assert.False(disabled.Enabled);
         Assert.Equal("2026-01-05", disabled.Anchor);
         view = await store.PutSiteTargetsAsync(tenant, site, new SiteTargetsWrite(view.ConfigVersion, [targets[0], App("doubao"), App("kimi")]), markIndividual: true);
-        Assert.Equal(tomorrow, (await TargetRowsAsync(cs, site))[CollectionIdentity.AppTargetKey("doubao")].Anchor);
+        Assert.Equal(today, (await TargetRowsAsync(cs, site))[CollectionIdentity.AppTargetKey("doubao")].Anchor);
 
         // Rejected saves change nothing: an unavailable platform (with the reason), a non-weekly frequency, a wrong surface.
         var before = await TargetRowsAsync(cs, site);

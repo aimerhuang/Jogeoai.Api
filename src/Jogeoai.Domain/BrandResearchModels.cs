@@ -84,6 +84,21 @@ public sealed record StartBrandResearchRequest(
 /// <param name="CreatedAt">创建时间。</param>
 public sealed record BrandResearchAccepted(Guid JobId, BrandResearchJobStatus Status, DateTimeOffset CreatedAt);
 
+/// <summary>
+/// 品牌站点已有进行中的研究任务（409 <c>RESEARCH_ALREADY_ACTIVE</c>）；错误响应的 <c>details.jobId</c> 为现有任务，
+/// 调用方应改为展示或取消该任务，而不是重复发起。
+/// </summary>
+/// <param name="jobId">该站点现有的 pending / running 研究任务标识。</param>
+public sealed class ResearchAlreadyActiveException(Guid jobId)
+    : CollectorStoreException(ErrorCode, "该品牌已有研究任务在进行中。", 409)
+{
+    /// <summary>稳定错误码 <c>RESEARCH_ALREADY_ACTIVE</c>。</summary>
+    public const string ErrorCode = "RESEARCH_ALREADY_ACTIVE";
+
+    /// <summary>该站点现有的 pending / running 研究任务标识。</summary>
+    public Guid JobId { get; } = jobId;
+}
+
 /// <summary>品牌研究任务状态响应。</summary>
 /// <param name="JobId">任务标识。</param>
 /// <param name="Status">任务状态。</param>

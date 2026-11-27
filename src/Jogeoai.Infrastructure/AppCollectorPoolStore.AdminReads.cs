@@ -30,7 +30,8 @@ public sealed partial class AppCollectorPoolStore
         SELECT n.node_id, n.status, {Iso("n.last_seen_at")}, {Iso(AppAdminSql.NodeLastActivity)},
                n.status = 'active' AND ({AppAdminSql.NodeLastActivity} IS NULL
                    OR {AppAdminSql.NodeLastActivity} <= UTC_TIMESTAMP(6) - INTERVAL {AppDailyReportRules.NodeOfflineMinutes} MINUTE),
-               n.collector_build_revision, COALESCE(b.total, 0), COALESCE(b.active, 0), {Iso("n.created_at")}, {Iso("n.updated_at")}
+               n.collector_build_revision, COALESCE(b.total, 0), COALESCE(b.active, 0), {Iso("n.created_at")}, {Iso("n.updated_at")},
+               n.max_devices
         FROM collector_app_nodes n
         {AppAdminSql.NodeBindingsJoin}
         {where}
@@ -39,12 +40,13 @@ public sealed partial class AppCollectorPoolStore
 
     private static AppNodeView NodeView(string[] row)
         => new(row[0], row[1] == "active" ? AppNodeStatus.Active : AppNodeStatus.Disabled, ParseIsoOrNull(row[2]), ParseIsoOrNull(row[3]),
-            Flag(row[4]), AppAdminSql.Text(row[5]), Int(row[6]), Int(row[7]), ParseIso(row[8]), ParseIso(row[9]));
+            Flag(row[4]), AppAdminSql.Text(row[5]), Int(row[6]), Int(row[7]), ParseIso(row[8]), ParseIso(row[9])) { MaxDevices = Int(row[10]) };
 
     /// <inheritdoc />
     public async Task<IReadOnlyList<AppNodeView>> ListNodesAsync(CancellationToken cancellationToken = default)
     {
         await using var connection = await OpenMigratedAsync(cancellationToken);
+        await AppChannelSchema.RequireBindingApprovalAsync(connection, null, cancellationToken);
         return (await QueryRowsAsync(connection, null, NodeSelect(""), cancellationToken)).Select(NodeView).ToArray();
     }
 
@@ -53,6 +55,7 @@ public sealed partial class AppCollectorPoolStore
     {
         nodeId = RequireNodeId(nodeId);
         await using var connection = await OpenMigratedAsync(cancellationToken);
+        await AppChannelSchema.RequireBindingApprovalAsync(connection, null, cancellationToken);
         var row = await QuerySingleAsync(connection, null, NodeSelect("WHERE n.node_id = @node"), cancellationToken, ("@node", nodeId))
             ?? throw new CollectorStoreException("APP_NODE_NOT_FOUND", "采集节点不存在。", 404);
         return NodeView(row);
@@ -65,7 +68,7 @@ public sealed partial class AppCollectorPoolStore
                {Iso("NULLIF(GREATEST(UTC_TIMESTAMP(6), IFNULL(cooldown_until, UTC_TIMESTAMP(6)), IFNULL(fence.until_at, UTC_TIMESTAMP(6))), UTC_TIMESTAMP(6))")},
                last_seen_at IS NULL OR last_seen_at <= UTC_TIMESTAMP(6) - INTERVAL {AppPoolRules.BindingOfflineMinutes} MINUTE,
                {Iso("last_seen_at")}, {Iso("last_leased_at")}, {Iso("last_success_at")}, {AppPoolRules.DeviceCooldownSeconds}, NULL,
-               {Iso("created_at")}, {Iso("updated_at")}
+               {Iso("created_at")}, {Iso("updated_at")}, approved_at IS NULL, {Iso("approved_at")}
         FROM collector_app_bindings
         LEFT JOIN (SELECT node_id AS fence_node, device_id AS fence_device, MAX({LastPossibleSend}) + INTERVAL {AppPoolRules.DeviceCooldownSeconds} SECOND AS until_at
                    FROM collector_app_device_attempts
@@ -81,7 +84,8 @@ public sealed partial class AppCollectorPoolStore
             AppAdminSql.Text(row[8]), row[9] == "active" ? AppBindingStatus.Active : AppBindingStatus.Stopped,
             AppContractNames.TryParse<AppBindingStopReason>(row[10], out var reason) ? reason : null, ParseIsoOrNull(row[11]),
             row[12].Length == 0 ? null : AppAdminSql.Long(row[12]), ParseIsoOrNull(row[13]), Flag(row[14]), ParseIsoOrNull(row[15]),
-            ParseIsoOrNull(row[16]), ParseIsoOrNull(row[17]), Int(row[18]), AppAdminSql.IntOrNull(row[19]), ParseIso(row[20]), ParseIso(row[21]));
+            ParseIsoOrNull(row[16]), ParseIsoOrNull(row[17]), Int(row[18]), AppAdminSql.IntOrNull(row[19]), ParseIso(row[20]), ParseIso(row[21]))
+        { ApprovalPending = Flag(row[22]), ApprovedAt = ParseIsoOrNull(row[23]) };
 
     /// <inheritdoc />
     public async Task<IReadOnlyList<AppBindingAdminView>> ListBindingsAsync(string? nodeId, string? platformCode, AppBindingStatus? status,
@@ -106,6 +110,7 @@ public sealed partial class AppCollectorPoolStore
         }
         await using var connection = await OpenMigratedAsync(cancellationToken);
         await AppChannelSchema.RequireDeviceDispatchAsync(connection, null, cancellationToken);
+        await AppChannelSchema.RequireBindingApprovalAsync(connection, null, cancellationToken);
         var where = conditions.Count == 0 ? "" : "WHERE " + string.Join(" AND ", conditions);
         return (await QueryRowsAsync(connection, null, BindingSelect(where), cancellationToken, [.. parameters])).Select(BindingView).ToArray();
     }
@@ -115,6 +120,7 @@ public sealed partial class AppCollectorPoolStore
     {
         await using var connection = await OpenMigratedAsync(cancellationToken);
         await AppChannelSchema.RequireDeviceDispatchAsync(connection, null, cancellationToken);
+        await AppChannelSchema.RequireBindingApprovalAsync(connection, null, cancellationToken);
         var row = await QuerySingleAsync(connection, null, BindingSelect("WHERE id = UUID_TO_BIN(@id)"), cancellationToken,
                 ("@id", bindingId.ToString()))
             ?? throw new CollectorStoreException("APP_BINDING_NOT_FOUND", "绑定不存在。", 404);

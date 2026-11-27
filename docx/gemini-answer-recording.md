@@ -33,7 +33,7 @@ Gemini 按品牌显式启用，新品牌的默认监控目标仍仅 ChatGPT。�
 3. 已有自动监控计划由后续每日时隙读取当前有效选择，不要求再次登录。没有计划时继续使用现有 `POST /api/v1/sites/{siteId}/prompt-monitoring` 初始化流程，只有首次建计划适用现役首轮规则。
 4. 用现有 Run/Check 查询跟踪采集进度。监控记录按 Gemini/问题/时间筛选，回答详情使用列表返回的同一快照；采集成功与后续品牌分析完成分开。
 
-自动监控费用沿用产品现役合同：每个问题 × 目标 × 采样 10 积分。5 个问题、ChatGPT 与 Gemini 两个目标、单采样预计每轮 100 积分。当前手动 `POST /api/v1/visibility-runs` 沿用 `ChargeMonitoringCredits=false`，不扣项目积分；这不代表没有真实 Cloro 调用消耗。本期不改变两类入口的现有计费行为。这不是 Cloro 对外价格；已受理的自动监控任务失败不承诺自动退款。
+自动监控费用沿用产品现役合同：每个问题 × 目标 × 采样 10 积分。5 个问题、ChatGPT 与 Gemini 两个目标、单采样预计每轮 100 积分。手动 `POST /api/v1/visibility-runs`（`targets` / `targetIds` / `previewId` 形态）自 2026-11-27 起同样传 `ChargeMonitoringCredits=true`，按同价预占项目积分，余额不足返回 402 `CREDIT_INSUFFICIENT` 且不创建运行（Trellis `11-27-sec-manual-run-charging`，代码已实现，本机 API / Worker 尚未用该构建重启；规则见[品牌监控配置说明](brand-monitoring-config.md) §4、§9）。Gemini 接入当期（2026-10-08）没有改变两类入口的计费行为：当时手动入口沿用 `ChargeMonitoringCredits=false`，不扣项目积分，但有真实 Cloro 调用消耗，本文记录的手动实测属于这一时期。这不是 Cloro 对外价格；已受理的自动监控任务失败不承诺自动退款。
 
 ## 结果质量
 

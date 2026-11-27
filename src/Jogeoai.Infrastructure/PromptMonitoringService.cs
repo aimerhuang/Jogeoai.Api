@@ -120,7 +120,8 @@ public sealed class PromptMonitoringService(MySqlDatabase database, IManagementS
             // Pause is one brand-level switch: a brand whose App plan is paused gets its main plan paused as well, without an
             // initial run. Without an App plan (every API-only brand) the plan is created enabled, as always.
             var paused = appPlan is { Enabled: false };
-            schedule = await schedules.CreateAsync(new(tenantId, siteId, PromptMonitoringIdentity.ScheduleName,
+            // Internal entry point: the public CreateAsync refuses the reserved monitoring names.
+            schedule = await schedules.CreateAutomaticPlanAsync(new(tenantId, siteId, PromptMonitoringIdentity.ScheduleName,
                 "daily", null, PromptMonitoringIdentity.MainLocalTime, brand.TimeZone, selection, !paused), cancellationToken);
 
             // The first run is created only when this monitoring plan is first
@@ -174,6 +175,10 @@ public sealed class PromptMonitoringService(MySqlDatabase database, IManagementS
         await ReconcileAppPlanAsync(tenantId, siteId, cancellationToken);
         return await View(tenantId, siteId, schedule, cancellationToken);
     }
+
+    /// <inheritdoc />
+    public Task SyncAppPlanAsync(Guid tenantId, Guid siteId, CancellationToken cancellationToken = default)
+        => ReconcileAppPlanAsync(tenantId, siteId, cancellationToken);
 
     // Lazy reconcile of the App plan (design 4.1). Best effort: a failure must not fail the read or the start of the daily
     // monitoring; the next lazy moment repeats it. It only creates the plan for a brand that already has its main plan.
@@ -256,10 +261,14 @@ public sealed class PromptMonitoringService(MySqlDatabase database, IManagementS
         AppMonitoringEstimate.BrandPrompts? appPrompts = null;
         AppCapacityQuery.Snapshot? appCapacity = null;
         IReadOnlyList<AutomaticMonitoringSelection.Target> appStored = [];
+        HashSet<string> appCovered = [];
         if (appEngines.Length > 0)
         {
             appPrompts = await AppMonitoringEstimate.BrandPromptsAsync(connection, transaction, tenantId, siteId, cancellationToken);
             appStored = await AppMonitoringPlan.TargetsAsync(connection, transaction, tenantId, siteId, cancellationToken);
+            // Platforms on which the current App cycle already queued something; the others start with an instant slot.
+            appCovered = (await AppCollectionStore.CoveredPairsAsync(connection, transaction, tenantId, siteId, DateTimeOffset.UtcNow,
+                cancellationToken)).Select(pair => pair.Platform).ToHashSet(StringComparer.Ordinal);
             appCapacity = await AppCapacityQuery.ReadAsync(connection, transaction, appChannel?.Value.OpenTenantIds() ?? [], cancellationToken);
         }
         await transaction.CommitAsync(cancellationToken);
@@ -272,13 +281,15 @@ public sealed class PromptMonitoringService(MySqlDatabase database, IManagementS
             .Select(t => AutomaticMonitoringSelection.StoredTarget(t.Write.Provider, t.Write.Engine, t.Write.Locale, t.Write.Country, null)).ToArray();
         var estimate = PromptMonitoringScale.EstimateTargets(snapshot, cells, unsupported, now, zone, available, appDrafts);
         if (appPrompts is null || appCapacity is null) return estimate;
-        // Anchors as PUT writes them (design 3.5): an App target that is already enabled keeps its anchor, a newly enabled
-        // one starts its first weekly cycle tomorrow.
+        // Anchors as PUT writes them: an App target that is already enabled keeps its anchor, a newly enabled one is anchored
+        // to today. A newly enabled cell, or a stored one that no current cycle covers yet, starts at once through an instant
+        // slot of the App plan (11-27-app-first-cycle-now).
         var anchors = new Dictionary<string, DateOnly>(StringComparer.Ordinal);
         foreach (var target in appStored)
             if (target.Anchor is { } anchor) anchors.TryAdd(target.Value.Engine, anchor);
         var appCells = appEngines.Select(engine => new AppMonitoringEstimate.AppCell(engine,
-            anchors.TryGetValue(engine, out var anchor) ? anchor : today.AddDays(1))).ToArray();
+            anchors.TryGetValue(engine, out var anchor) ? anchor : today,
+            !anchors.ContainsKey(engine) || !appCovered.Contains(engine))).ToArray();
         return AppMonitoringEstimate.Combine(estimate, appPrompts, appCells,
             (engine, demand) => appCapacity.ForBrand(engine, tenantId, siteId, demand), now, zone);
     }

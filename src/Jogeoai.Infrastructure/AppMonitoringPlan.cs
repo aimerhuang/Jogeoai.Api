@@ -82,6 +82,7 @@ internal static class AppMonitoringPlan
         MainPausedCode => "品牌监控已暂停，App 时隙未提交，也未预留积分。",
         AutomaticMonitoringSelection.NotDueCode => "本时隙没有到期的 App 目标（1次/周），未提交，也未预留积分。",
         TooLargeCode => "品牌启用的提问超过 200 个，App 时隙未提交。",
+        AutomaticMonitoringSelection.AlreadyCollectedCode => "本时隙的 App 提问与平台已在当前周期内排入采集，未重复提交，也未预留积分。",
         PlatformUnavailableCode => "到期的 App 平台当前都不可用，本时隙未提交，也未预留积分。",
         _ => "没有可在 App 渠道采集的提问与目标，本时隙未提交。",
     };
@@ -186,6 +187,7 @@ internal static class AppMonitoringPlan
         {
             var planZone = main?.TimeZone ?? ValidZone(brandZone);
             var start = main?.Enabled ?? true;
+            var planId = Guid.NewGuid();
             await using var insert = new MySqlCommand("""
                 INSERT INTO collection_schedules
                     (id, tenant_id, site_id, name, cadence, day_of_week, local_time, time_zone,
@@ -193,7 +195,7 @@ internal static class AppMonitoringPlan
                 VALUES (UUID_TO_BIN(@id), UUID_TO_BIN(@tenant), UUID_TO_BIN(@site), @name, 'daily', NULL,
                         @local, @zone, @selection, @enabled, @next, 0, @now, @now);
                 """, connection, tx);
-            insert.Parameters.AddWithValue("@id", Guid.NewGuid().ToString());
+            insert.Parameters.AddWithValue("@id", planId.ToString());
             insert.Parameters.AddWithValue("@tenant", tenant.ToString());
             insert.Parameters.AddWithValue("@site", site.ToString());
             insert.Parameters.AddWithValue("@name", PromptMonitoringIdentity.AppScheduleName);
@@ -204,6 +206,7 @@ internal static class AppMonitoringPlan
             insert.Parameters.AddWithValue("@next", start ? NextSlot(planZone, now).UtcDateTime : DBNull.Value);
             insert.Parameters.AddWithValue("@now", now.UtcDateTime);
             await insert.ExecuteNonQueryAsync(ct);
+            if (start) await TryInsertInstantSlotAsync(connection, tx, tenant, site, planId, planZone, json, selection, now, ct);
             await tx.CommitAsync(ct);
             return;
         }
@@ -212,7 +215,12 @@ internal static class AppMonitoringPlan
         var newZone = main?.TimeZone ?? zone;
         var zoneChanged = !string.Equals(zone, newZone, StringComparison.Ordinal);
         if (wanted == enabled && !zoneChanged && old is not null
-            && CollectionIdentity.SelectionHash(old) == CollectionIdentity.SelectionHash(selection)) return;
+            && CollectionIdentity.SelectionHash(old) == CollectionIdentity.SelectionHash(selection))
+        {
+            if (wanted) await TryInsertInstantSlotAsync(connection, tx, tenant, site, appId.Value, zone, json, selection, now, ct);
+            await tx.CommitAsync(ct);
+            return;
+        }
         // Same next-slot rule as a schedule update: none while paused, the next 09:11 when resumed or re-zoned, else unchanged.
         var retime = wanted && (!enabled || zoneChanged);
         await using var update = new MySqlCommand($"""
@@ -227,7 +235,59 @@ internal static class AppMonitoringPlan
         if (retime) update.Parameters.AddWithValue("@next", NextSlot(newZone, now).UtcDateTime);
         update.Parameters.AddWithValue("@now", now.UtcDateTime);
         await update.ExecuteNonQueryAsync(ct);
+        if (wanted) await TryInsertInstantSlotAsync(connection, tx, tenant, site, appId.Value, newZone, json, selection, now, ct);
         await tx.CommitAsync(ct);
+    }
+
+    /// <summary>
+    /// Inserts a pending instant slot (key: the current local second, <see cref="AppCycleRules.InstantSlotKey"/>) when the brand has enabled prompt × App
+    /// platform pairs that the current cycle does not cover yet — a newly enabled App target, a new or newly enabled prompt,
+    /// a prompt scope widened to an App platform (design: 11-27-app-first-cycle-now). The Worker expands it within its next
+    /// pass through <see cref="AppCollectionStore.CreateCycleRunAsync"/>, which plans the same pairs with the same rules.
+    /// Runs inside the reconcile transaction (site and App plan rows locked) for an open tenant and an enabled plan. Nothing is
+    /// inserted while the plan's regular slot is due (the Worker takes it), while any slot of the plan is still pending (the
+    /// Worker reconciles again after each App slot), after the plan's latest slot was skipped as APP_CHANNEL_NOT_OPEN (the
+    /// Worker's tenant list differs from this process's), or when every pair is covered or would be skipped. No run, task or reservation is written here.
+    /// </summary>
+    private static async Task TryInsertInstantSlotAsync(MySqlConnection connection, MySqlTransaction tx, Guid tenant, Guid site,
+        Guid planId, string zoneId, string selectionJson, CollectionScheduleSelection selection, DateTimeOffset now, CancellationToken ct)
+    {
+        if (selection.PromptIds.Count == 0 || selection.Targets.Count == 0) return;
+        if (!await AppChannelSchema.IsMigratedAsync(connection, tx, ct)) return;
+        var zone = CollectionScheduleCalendar.ParseTimeZone(zoneId);
+        var key = AppCycleRules.InstantSlotKey(TimeZoneInfo.ConvertTime(now, zone).DateTime);
+        await using (var state = new MySqlCommand("""
+            SELECT plan.next_slot_at IS NULL OR plan.next_slot_at <= @now,
+                   EXISTS (SELECT 1 FROM schedule_slots slot WHERE slot.schedule_id = plan.id
+                           AND (slot.status = 'pending' OR slot.local_slot_key = @key))
+                   OR COALESCE((SELECT last.skip_code = @closed FROM schedule_slots last WHERE last.schedule_id = plan.id
+                                ORDER BY last.created_at DESC, last.id DESC LIMIT 1), FALSE)
+            FROM collection_schedules plan WHERE plan.id = UUID_TO_BIN(@plan);
+            """, connection, tx))
+        {
+            state.Parameters.AddWithValue("@now", now.UtcDateTime);
+            state.Parameters.AddWithValue("@key", key);
+            // The Worker answered the last slot with "not open": its Collector:AppTenantIds differs from this process's. No more
+            // instant slots until a slot of the plan is expanded again, or each reconcile would add one that is skipped.
+            state.Parameters.AddWithValue("@closed", NotOpenCode);
+            state.Parameters.AddWithValue("@plan", planId.ToString());
+            await using var reader = await state.ExecuteReaderAsync(ct);
+            if (!await reader.ReadAsync(ct) || reader.GetBoolean(0) || reader.GetBoolean(1)) return;
+        }
+        var plan = await AppCollectionStore.PlanPairsAsync(connection, tx, tenant, site, selection,
+            AppCycleRules.NominalUtc(key, zone), ct);
+        if (plan.Skip is not null) return;
+        await using var insert = new MySqlCommand("""
+            INSERT INTO schedule_slots
+                (id, schedule_id, local_slot_key, selection_snapshot, run_id, missed_slots, created_at, status, skip_code, skip_message)
+            VALUES (UUID_TO_BIN(@id), UUID_TO_BIN(@plan), @key, @selection, NULL, 0, @now, 'pending', NULL, NULL);
+            """, connection, tx);
+        insert.Parameters.AddWithValue("@id", Guid.NewGuid().ToString());
+        insert.Parameters.AddWithValue("@plan", planId.ToString());
+        insert.Parameters.AddWithValue("@key", key);
+        insert.Parameters.AddWithValue("@selection", selectionJson);
+        insert.Parameters.AddWithValue("@now", now.UtcDateTime);
+        await insert.ExecuteNonQueryAsync(ct);
     }
 
     private sealed record MainPlan(bool Enabled, string TimeZone);

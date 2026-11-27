@@ -10,7 +10,7 @@ using static Jogeoai.Tests.AppLeaseSqlTests;
 namespace Jogeoai.Tests;
 
 /// <summary>
-/// 隔离库（已执行 001–049、库名含 _test）上的 App 运营写操作（implement 8.3 / 8.5），经过真实的 Store 和控制器：运营停用与恢复绑定后的领取；
+/// 隔离库（已执行 001–052、库名含 _test）上的 App 运营写操作（implement 8.3 / 8.5），经过真实的 Store 和控制器：运营停用与恢复绑定后的领取；
 /// 运营停用不被采集器的 ok 上报覆盖；调整绑定和平台的限速后领取按新值；暂停与恢复平台；恢复被判定不可用的入口；每个写操作都有一条
 /// actor 为运营人员的审计事件；令牌只出现在登记和轮换的响应里；审计事件的筛选与稳定分页。未设置 JOGEOAI_APP_CHANNEL_TEST_CONNECTION 时跳过。
 /// 时间推进靠改写数据库时间戳，不用 sleep；PoolAsync 清理节点、绑定、事件并恢复平台闸门与 App 入口，再核对整库行数。
@@ -168,6 +168,53 @@ public sealed class AppAdminSqlTests
         Assert.Equal(AppUnavailableReasons.EmulatorRejected, JsonSerializer.Deserialize<JsonElement>(await pool.RowAsync(
             "SELECT CAST(detail AS CHAR) FROM collector_app_events WHERE event_kind = 'platform_entry_restored' AND actor = @actor;", ("@actor", Actor(ops))))
             .GetProperty("from").GetString());
+    });
+
+    // Migration 052, RF2: the device cap is set per node through the admin route, never below what the node has registered;
+    // each actual change leaves one operator event, and the cap applies to the node's next bindings report.
+    [AppChannelMySqlFact]
+    public Task TheDeviceCapIsSetThroughTheAdminRouteAndAppliesToTheNextReport() => PoolAsync(async (pool, _) =>
+    {
+        var ops = BuildOps(pool);
+        var c = ops.Controller;
+        var (node, _) = await pool.NodeAsync("mac", defaultDeviceCap: true);
+        await pool.BindAsync(node, "AVD_A", "doubao");
+        await pool.BindAsync(node, "AVD_B", "doubao");
+        Assert.Equal(AppPoolRules.DefaultMaxDevicesPerNode, Ok(await c.ListNodes(default)).Single(item => item.NodeId == node).MaxDevices);
+
+        foreach (var bad in new int?[] { null, 0, 65 })
+            AssertError((await c.SetNodeMaxDevices(node, new(bad), default)).Result, 400, "INVALID_APP_LIMITS");
+        AssertError((await c.SetNodeMaxDevices(node, new(1), default)).Result, 409, "APP_NODE_MAX_DEVICES_BELOW_REGISTERED");
+        AssertError((await c.SetNodeMaxDevices("missing-node", new(8), default)).Result, 404, "APP_NODE_NOT_FOUND");
+        var same = Ok(await c.SetNodeMaxDevices(node, new(4), default));
+        Assert.Equal((false, 4), (same.Changed, same.Node.MaxDevices));
+        Assert.Empty(await OperatorEventsAsync(pool, ops));
+
+        var raised = Ok(await c.SetNodeMaxDevices(node, new(8), default));
+        Assert.Equal((true, 8), (raised.Changed, raised.Node.MaxDevices));
+        // Exactly the number of registered devices is allowed.
+        var lowered = Ok(await c.SetNodeMaxDevices(node, new(2), default));
+        Assert.Equal((true, 2), (lowered.Changed, lowered.Node.MaxDevices));
+        Assert.Equal(["node_max_devices_changed", "node_max_devices_changed"], await OperatorEventsAsync(pool, ops));
+
+        // The node's next report: a third device is over the cap, another App on a registered device is not.
+        var report = await ops.Pool.ReportBindingsAsync(new AppBindingReportCommand(node, "test-rev",
+        [
+            new AppBindingReport("AVD_C", "doubao", $"doubao-{Guid.NewGuid():N}", "pkg.doubao", "1.0", "1.0", "15", "ok"),
+            new AppBindingReport("AVD_A", "kimi", $"kimi-{Guid.NewGuid():N}", "pkg.kimi", "1.0", "1.0", "15", "ok"),
+        ]));
+        Assert.Equal(("AVD_C", AppPoolRules.DeviceLimitExceededCode), (Assert.Single(report.Rejected).DeviceId, Assert.Single(report.Rejected).Code));
+        var added = Assert.Single(report.Bindings);
+        Assert.Equal(("AVD_A", "kimi", AppBindingStatus.Stopped, (AppBindingStopReason?)AppBindingStopReason.DisabledByOperator),
+            (added.DeviceId, added.PlatformCode, added.Status, added.StopReason));
+        // The new binding shows as waiting for approval in the operator's list; the two approved ones do not.
+        var listed = Ok(await c.ListBindings(node, null, null, default));
+        Assert.Equal([added.BindingId], listed.Where(item => item.ApprovalPending).Select(item => item.Id));
+        Assert.All(listed.Where(item => !item.ApprovalPending), item => Assert.NotNull(item.ApprovedAt));
+        // Approving it through the resume route.
+        var approved = Ok(await c.ResumeBinding(added.BindingId, default));
+        Assert.Equal((true, false, AppBindingStatus.Active), (approved.Changed, approved.Binding.ApprovalPending, approved.Binding.Status));
+        Assert.NotNull(approved.Binding.ApprovedAt);
     });
 
     // PRD A10: by task id an operator sees every attempt in lease order — device, account label, whether and when the question

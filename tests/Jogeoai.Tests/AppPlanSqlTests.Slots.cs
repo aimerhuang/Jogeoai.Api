@@ -76,13 +76,13 @@ public sealed partial class AppPlanSqlTests
         Assert.Equal(("pending", null, null), (monday.Status, monday.SkipCode, monday.RunId));
         AssertSameJson(Snapshot([prompts[0]], [AppTarget("doubao")]), monday.Snapshot);
         await PlanAfterSlotAsync("2000-01-04 01:11:00");
-        var pending = Assert.Single(await rig.Schedules.GetPendingSlotsAsync(100), s => s.ScheduleId == plan.Id);
+        var pending = Assert.Single((await rig.Schedules.GetPendingSlotsAsync(100)).Regular(), s => s.ScheduleId == plan.Id);
         Assert.False(await closed.Schedules.ProcessSlotAsync(pending, closed.Runs));
         monday = await SlotAsync(cs, plan.Id, "20000103T0911");
         Assert.Equal(("skipped", "APP_CHANNEL_NOT_OPEN", null), (monday.Status, monday.SkipCode, monday.RunId));
         Assert.False(string.IsNullOrWhiteSpace(monday.SkipMessage));
         // A second pass finds nothing to process, with the open store or a store without the App options.
-        Assert.DoesNotContain(await rig.Schedules.GetPendingSlotsAsync(100), s => s.ScheduleId == plan.Id);
+        Assert.DoesNotContain((await rig.Schedules.GetPendingSlotsAsync(100)).Regular(), s => s.ScheduleId == plan.Id);
         Assert.False(await closed.Schedules.ProcessSlotAsync(pending, closed.Runs));
         Assert.False(await rig.Schedules.ProcessSlotAsync(pending, rig.Runs));
         await PlanAfterSlotAsync("2000-01-04 01:11:00");
@@ -93,7 +93,7 @@ public sealed partial class AppPlanSqlTests
         Assert.Equal(("pending", null), (tuesday.Status, tuesday.SkipCode));
         AssertSameJson(Snapshot(prompts, [AppTarget("kimi")], new CollectionPromptTargets(prompts[1], [AppKey("kimi")])), tuesday.Snapshot);
         // A pending App slot processed by a store without the App options is consumed the same way, never as an API run.
-        Assert.False(await closed.Schedules.ProcessSlotAsync(Assert.Single(await closed.Schedules.GetPendingSlotsAsync(100), s => s.ScheduleId == plan.Id), closed.Runs));
+        Assert.False(await closed.Schedules.ProcessSlotAsync(Assert.Single((await closed.Schedules.GetPendingSlotsAsync(100)).Regular(), s => s.ScheduleId == plan.Id), closed.Runs));
         Assert.Equal(("skipped", "APP_CHANNEL_NOT_OPEN"), ((await SlotAsync(cs, plan.Id, "20000104T0911")).Status, (await SlotAsync(cs, plan.Id, "20000104T0911")).SkipCode));
         await PlanAfterSlotAsync("2000-01-05 01:11:00");
 
@@ -160,7 +160,7 @@ public sealed partial class AppPlanSqlTests
     });
 
     // One worker pass over a brand that has a user's own plan, the main plan and the App plan due at the same time: the
-    // first two create their runs as before (the main plan charged, the custom plan not); the App slot creates its cycle
+    // first two create their runs and both reserve credits (every plan's slot run is charged); the App slot creates its cycle
     // run without a provider task or a reservation.
     [AppChannelMySqlFact]
     public Task CustomAndMainPlansProcessAsBeforeNextToAnAppPlan() => AppSiteTargetsSqlTests.IsolatedAsync(async (cs, seedTenant) =>
@@ -184,7 +184,7 @@ public sealed partial class AppPlanSqlTests
         var before = await PlansAsync(cs, site);
 
         Assert.Equal(3, await rig.Schedules.MaterializeDueSlotsAsync(Utc(3, 3, 0), 10));
-        var slots = (await rig.Schedules.GetPendingSlotsAsync(100)).Where(s => new[] { mainId, appId, custom.Id }.Contains(s.ScheduleId)).ToArray();
+        var slots = ((await rig.Schedules.GetPendingSlotsAsync(100)).Regular()).Where(s => new[] { mainId, appId, custom.Id }.Contains(s.ScheduleId)).ToArray();
         Assert.Equal(3, slots.Length);
         // The frozen requests: the main slot the API cell only, the App slot the App cell only, the custom slot its own selection.
         AssertSameJson(Snapshot(prompts, [ChatGptTarget]), (await SlotAsync(cs, mainId, "20000103T0901")).Snapshot);
@@ -205,18 +205,19 @@ public sealed partial class AppPlanSqlTests
         Assert.Equal(("completed", null), (mainSlot.Status, mainSlot.SkipCode));
         Assert.Equal(("completed", null), (customSlot.Status, customSlot.SkipCode));
         Assert.Equal(("completed", null), (appSlot.Status, appSlot.SkipCode));
-        // Main plan run: 2 prompts × ChatGPT, charged 20 credits. Custom plan run: 1 prompt × ChatGPT × 2 samples, not charged.
+        // Main plan run: 2 prompts × ChatGPT, charged 20 credits. Custom plan run: 1 prompt × ChatGPT × 2 samples, charged 20
+        // credits as well (every plan's slot run reserves credits since 11-27-sec-manual-run-charging).
         async Task<string> RunAsync(string runId) => string.Join("|", (await RowsAsync(cs, """
             SELECT r.requested_by, r.total_checks, COALESCE(m.estimated_credits, 'none') FROM visibility_runs r
             LEFT JOIN monitoring_credit_reservations m ON m.run_id = r.id WHERE r.id = UUID_TO_BIN(@run);
             """, ("@run", runId)))[0]);
         Assert.Equal($"schedule:{mainId:N}|2|20.000", await RunAsync(mainSlot.RunId!));
-        Assert.Equal($"schedule:{custom.Id:N}|2|none", await RunAsync(customSlot.RunId!));
+        Assert.Equal($"schedule:{custom.Id:N}|2|20.000", await RunAsync(customSlot.RunId!));
         // The App cycle run: 2 prompts × doubao, no reservation.
         Assert.Equal($"schedule:{appId:N}|2|none", await RunAsync(appSlot.RunId!));
-        // Initial run + main slot run + custom slot run, exactly as before: 6 API checks, 6 provider tasks, 2 reservations,
-        // 2 ledger entries, 40 credits. The App cycle run adds 1 run, 2 checks and 2 collector tasks and nothing else.
-        Assert.Equal("runs=4|checks=8|providerTasks=6|collectorTasks=2|reservations=2|ledger=2|balance=960.000", await CollectionFootprintAsync(cs, rig.Tenant));
+        // Initial run + main slot run + custom slot run: 6 API checks, 6 provider tasks, 3 reservations, 3 ledger entries,
+        // 60 credits. The App cycle run adds 1 run, 2 checks and 2 collector tasks and nothing else.
+        Assert.Equal("runs=4|checks=8|providerTasks=6|collectorTasks=2|reservations=3|ledger=3|balance=940.000", await CollectionFootprintAsync(cs, rig.Tenant));
         Assert.Equal("2|1|1|2", string.Join("|", (await RowsAsync(cs, """
             SELECT (SELECT COUNT(*) FROM visibility_checks WHERE tenant_id = UUID_TO_BIN(@tenant) AND (provider = 'app_collector' OR capture_mode = 'app')),
                    (SELECT COUNT(*) FROM run_engines e JOIN visibility_runs r ON r.id = e.run_id WHERE r.tenant_id = UUID_TO_BIN(@tenant) AND e.provider = 'app_collector'),
@@ -233,7 +234,7 @@ public sealed partial class AppPlanSqlTests
         Assert.Equal(1, await rig.Schedules.MaterializeDueSlotsAsync(Utc(10, 1, 12), 10));
         var paused = await SlotAsync(cs, appId, "20000110T0911");
         Assert.Equal(("skipped", "SCHEDULE_DISABLED", null), (paused.Status, paused.SkipCode, paused.RunId));
-        Assert.StartsWith("runs=4|checks=8|providerTasks=6|collectorTasks=2|reservations=2|", await CollectionFootprintAsync(cs, rig.Tenant), StringComparison.Ordinal);
+        Assert.StartsWith("runs=4|checks=8|providerTasks=6|collectorTasks=2|reservations=3|", await CollectionFootprintAsync(cs, rig.Tenant), StringComparison.Ordinal);
         await ParkSlotsAsync(cs, site);
     });
 }

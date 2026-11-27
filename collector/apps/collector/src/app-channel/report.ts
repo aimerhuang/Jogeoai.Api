@@ -1,11 +1,13 @@
 import type { AppPlatformCode, DeviceDeclaration, ResolvedBinding } from "./bindings.ts";
 import {
   citationsStatusSchema,
+  linkIssueSchema,
   sha256Text,
   type AppRecord,
   type BatchFile,
   type CitationsStatus,
   type EvidenceStore,
+  type LinkIssue,
   type PlatformStatus,
 } from "./evidence.ts";
 import type { AppFailureCode } from "./failure.ts";
@@ -31,6 +33,10 @@ export interface PlatformReport extends Counts {
   // Valid samples by how their sources were read. Samples written before the status existed
   // are in none of the four, so the sum can be lower than `valid`.
   citations: Record<CitationsStatus, number>;
+  // Sources of valid samples whose contract had every source opened to read its link: how many,
+  // how many with a link, how many of those kept as copied because it could not be restored, and
+  // the others by cause. Sources read without opening them are in none of these.
+  links: LinkCounts;
   // usable: at least one valid sample in this batch. unavailable: the App entry was judged
   // unavailable or every binding is disabled. not_verified: neither yet.
   conclusion: "usable" | "unavailable" | "not_verified";
@@ -39,6 +45,12 @@ export interface PlatformReport extends Counts {
   devices: DeviceDeclaration[];
   // Failure classes seen, the unavailability class, and why bindings are disabled.
   reasons: string[];
+}
+export interface LinkCounts {
+  sources: number;
+  withUrl: number;
+  notRestored: number;
+  issues: Record<LinkIssue, number>;
 }
 export interface BindingReport extends Counts {
   device: string;
@@ -77,6 +89,25 @@ function countCitations(records: readonly AppRecord[]): Record<CitationsStatus, 
       valid.filter((record) => record.citationsStatus === status).length,
     ]),
   ) as Record<CitationsStatus, number>;
+}
+
+function countLinks(records: readonly AppRecord[]): LinkCounts {
+  const sources = records
+    .filter((record) => record.status === "valid")
+    .flatMap((record) => record.citations)
+    .flatMap((source) => (source.link ? [source.link] : []));
+  const copied = sources.flatMap((link) => ("copied" in link ? [link] : []));
+  return {
+    sources: sources.length,
+    withUrl: copied.length,
+    notRestored: copied.filter((link) => !link.restored).length,
+    issues: Object.fromEntries(
+      linkIssueSchema.options.map((issue) => [
+        issue,
+        sources.filter((link) => "issue" in link && link.issue === issue).length,
+      ]),
+    ) as Record<LinkIssue, number>,
+  };
 }
 
 export interface ReportInput {
@@ -124,6 +155,7 @@ export function buildReport(input: ReportInput): BatchReport {
         ...counts,
         notCollected: planned - collected(platformCode),
         citations: countCitations(ownRecords),
+        links: countLinks(ownRecords),
         conclusion:
           counts.valid > 0
             ? "usable"

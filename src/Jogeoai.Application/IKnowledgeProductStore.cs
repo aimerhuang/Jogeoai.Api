@@ -46,7 +46,7 @@ public interface IKnowledgeProductStore
     /// <param name="cancellationToken">取消令牌。</param>
     Task<bool> IsMigratedAsync(Guid tenantId, Guid productId, CancellationToken cancellationToken = default);
 
-    /// <summary>领取一个识别任务并建立租约。</summary>
+    /// <summary>领取一个识别任务并建立租约。队列为空时返回 null；选中的任务租约已过期且执行次数达到上限（3 次）时，在领取事务内把任务记为失败（<c>PRODUCT_PARSE_INTERRUPTED</c>）、产品记为识别失败并同样返回 null，调用方下一轮再领取。</summary>
     Task<ProductParseJobLease?> ClaimParseJobAsync(string workerId, TimeSpan lease,
         CancellationToken cancellationToken = default);
 

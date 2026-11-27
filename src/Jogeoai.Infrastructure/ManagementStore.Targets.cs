@@ -463,10 +463,11 @@ public sealed partial class ManagementStore
         foreach (var target in normalized)
         {
             var write = target.Write;
-            // design 3.5: a newly enabled App target starts its first weekly cycle the day after it is enabled (the App plan's
-            // slot of the enabling day has usually passed). The SQL below only takes this value when the target is newly
-            // enabled, so re-saving an enabled App target keeps its anchor. API targets keep today.
-            var anchor = target.App ? today.AddDays(1) : today;
+            // A newly enabled App target is anchored to the enabling day like an API target (11-27-app-first-cycle-now): its
+            // first cycle starts at once through an instant slot of the App plan and runs to the same weekday's 09:11 next week,
+            // after which the regular weekly slots on that weekday take over. The SQL below only takes this value when the
+            // target is newly enabled, so re-saving an enabled App target keeps its anchor.
+            var anchor = today;
             (string, object?)[] parameters = [("@id", Guid.NewGuid().ToString()), ("@tenant", tenantId.ToString()),
                 ("@site", siteId.ToString()), ("@provider", write.Provider), ("@engine", write.Engine),
                 ("@capture", write.CaptureMode), ("@country", write.Country), ("@locale", write.Locale),
@@ -605,8 +606,9 @@ public sealed partial class ManagementStore
         await transaction.CommitAsync(cancellationToken);
         var catalog = await GetTargetCatalogAsync(cancellationToken);
         var available = frozen.Targets.All(t => catalog.Any(c => c.Provider == t.Provider && c.Engine == t.Engine && c.Availability == "available"));
+        // A run created from this preview reserves the same amount: checks × the monitoring unit price.
         return new CollectionPreviewView(previewId, siteId, frozen.PromptIds, frozen.Targets, frozen.SampleCount,
-            expected, expected, null, available ? "available" : "unavailable", version, expires, targetVersion);
+            expected, expected, PromptMonitoringPricing.Estimate((long)expected), available ? "available" : "unavailable", version, expires, targetVersion);
     }
 
     public async Task<(IReadOnlyList<Guid> PromptIds, IReadOnlyList<CloroVisibilityTarget> Targets, int SampleCount)> ResolveRunAsync(

@@ -11,9 +11,25 @@ public sealed class SessionAuthenticationMiddleware(RequestDelegate next)
     /// <summary>HttpContext.Items 中保存已验证身份的键。</summary>
     public const string ContextItemKey = "Jogeoai.AuthenticatedRequestContext";
 
+    /// <summary>
+    /// 请求路径是否不加载用户会话：<c>/internal</c>（采集接口，由节点令牌或服务令牌鉴权）与 <c>/mcp</c>（由 MCP 令牌鉴权）
+    /// 及其子路径，按路径段匹配、不区分大小写。这些路径上的 Bearer 不是会话令牌，不为它查询 auth_sessions。
+    /// </summary>
+    /// <param name="path">请求路径。</param>
+    public static bool SkipsSession(PathString path)
+        => path.StartsWithSegments("/internal", StringComparison.OrdinalIgnoreCase)
+            || path.StartsWithSegments("/mcp", StringComparison.OrdinalIgnoreCase);
+
     /// <summary>执行当前请求的会话验证。</summary>
     public async Task InvokeAsync(HttpContext context, IIdentityStore identityStore)
     {
+        // 这些路径不使用用户会话：不读取令牌，也不查库。要求会话的 Controller 不能放在这两个前缀下（否则一律 401）。
+        if (SkipsSession(context.Request.Path))
+        {
+            await next(context);
+            return;
+        }
+
         var token = ReadToken(context);
         if (token is not null)
         {

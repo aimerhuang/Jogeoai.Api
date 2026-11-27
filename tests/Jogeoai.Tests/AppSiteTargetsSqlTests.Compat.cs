@@ -29,7 +29,7 @@ public sealed partial class AppSiteTargetsSqlTests
             .Select(r => Guid.Parse(r[0]!)).ToArray();
 
     private static Task CreateMainPlanAsync(MySqlDatabase database, Guid tenant, Guid site, Guid[] prompts, params SiteTargetWrite[] targets)
-        => new CollectionScheduleStore(database).CreateAsync(new CreateCollectionScheduleCommand(tenant, site, PromptMonitoringIdentity.ScheduleName,
+        => new CollectionScheduleStore(database).CreateAutomaticPlanAsync(new CreateCollectionScheduleCommand(tenant, site, PromptMonitoringIdentity.ScheduleName,
             "daily", null, PromptMonitoringIdentity.MainLocalTime, Zone, new CollectionScheduleSelection(prompts, targets.Select(Target).ToArray()), Enabled: true));
 
     // The site-target response with the three new fields removed from every item (optionally only the non-App items, without the version).
@@ -265,6 +265,8 @@ public sealed partial class AppSiteTargetsSqlTests
 
         // A preview snapshot that names an App target (it cannot be created through the API) is refused as well.
         var frozen = await store.CreatePreviewAsync(tenant, site, new CollectionSelection([prompt], null, [chatGptId]));
+        // RD6 (11-27-sec-manual-run-charging): the preview carries what the run will reserve, checks × the unit price.
+        Assert.Equal((1, PromptMonitoringPricing.UnitPrice), (frozen.ExpectedChecks, frozen.EstimatedAmount));
         await ExecAsync(cs, "UPDATE collection_previews SET selection_snapshot = JSON_SET(selection_snapshot, '$.targets[0].provider', 'app_collector') WHERE id = UUID_TO_BIN(@id);",
             ("@id", frozen.PreviewId.ToString()));
         var byPreview = await Assert.ThrowsAsync<CollectorStoreException>(() => store.ResolveRunAsync(tenant, site,

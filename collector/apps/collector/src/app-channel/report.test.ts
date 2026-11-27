@@ -293,6 +293,82 @@ describe("batch report", () => {
     expect(JSON.stringify(counted)).not.toContain("cited");
     expect(JSON.stringify(counted)).not.toContain("source_list_empty");
   });
+  // Task 11-24: links read by opening each source.
+  it("counts the links of the sources that were opened, by outcome and cause", () => {
+    const linked = (url: string | null, link: AppRecord["citations"][number]["link"]) => ({
+      title: "合成来源",
+      site: null,
+      url,
+      ...(link ? { link } : {}),
+    });
+    const sample = (citations: AppRecord["citations"], overrides: Partial<AppRecord> = {}) =>
+      record({
+        platformCode: "doubao",
+        questionText: QUESTIONS[0]!,
+        citations,
+        citationsStatus: "read",
+        ...overrides,
+      });
+    const counted = buildReport({
+      batchId: "batch-1",
+      batch: batch(["doubao"]),
+      records: [
+        sample([
+          linked("https://example.com/1", {
+            copied: "https://example.com/1?theme=light",
+            restored: true,
+          }),
+          linked("https://link.example.cn/x", {
+            copied: "https://link.example.cn/x",
+            restored: false,
+          }),
+          linked(null, { issue: "page_not_opened" }),
+          linked(null, { issue: "time_budget" }),
+          // Android's share sheet not declared; another App opened (task 11-24 §11.1).
+          linked(null, { issue: "share_external" }),
+          linked(null, { issue: "left_app" }),
+        ]),
+        sample([linked(null, { issue: "time_budget" })]),
+        // Read without opening the sources (a contract without links, or an older record).
+        sample([linked(null, undefined)]),
+        // Not a valid sample: not counted.
+        sample([linked(null, { issue: "page_not_closed" })], {
+          status: "evidence_incomplete",
+          phase: "post_send",
+          evidenceIssue: "screenshot_failed",
+          screenshot: null,
+        }),
+      ],
+      bindings: bindings(),
+      platformStatus: { version: 1, platforms: {} },
+      now: NOW,
+    });
+    expect(counted.platforms[0]!.links).toEqual({
+      sources: 7,
+      withUrl: 2,
+      notRestored: 1,
+      issues: {
+        page_not_opened: 1,
+        share_missing: 0,
+        copy_missing: 0,
+        clipboard_unchanged: 0,
+        not_a_link: 0,
+        page_not_closed: 0,
+        not_attempted: 0,
+        not_reached: 0,
+        time_budget: 2,
+        row_not_found: 0,
+        share_external: 1,
+        left_app: 1,
+      },
+    });
+    // A platform without such records counts nothing.
+    expect(counted.platforms[1]!.links).toMatchObject({ sources: 0, withUrl: 0, notRestored: 0 });
+    // Counts and cause words only: no title and no link.
+    const text = JSON.stringify(counted);
+    expect(text).not.toContain("合成来源");
+    expect(text).not.toContain("example");
+  });
   it("counts per binding, including bindings without any attempt", () => {
     const row = (device: string, platform: string) =>
       report.bindings.find((item) => item.device === device && item.platform === platform);

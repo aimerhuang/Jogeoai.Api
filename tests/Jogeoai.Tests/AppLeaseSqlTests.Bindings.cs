@@ -10,7 +10,8 @@ public sealed partial class AppLeaseSqlTests
         => new(device, platform, label, $"pkg.{platform}", "1.0", installed, "15", health);
 
     // Upsert by (node, device, platform); limits come from the control plane; an account label can live in one binding only;
-    // a rejected binding does not stop the rest of the report.
+    // a rejected binding does not stop the rest of the report. Since migration 052 a new binding is registered waiting for
+    // the operator's approval (stopped / disabled_by_operator); the two bindings are approved here before the upsert checks.
     [AppChannelMySqlFact]
     public Task ABindingReportUpsertsByDeviceAndPlatformAndRejectsADuplicateAccountWithAnAuditEvent() => PoolAsync(async (pool, _) =>
     {
@@ -24,12 +25,17 @@ public sealed partial class AppLeaseSqlTests
             [Report("AI_Apps_4KB", "doubao", doubaoA), Report("AI_Apps_4KB", "kimi", kimiA)]));
         Assert.Empty(registered.Rejected);
         Assert.Equal(["AI_Apps_4KB|doubao", "AI_Apps_4KB|kimi"], registered.Bindings.Select(binding => $"{binding.DeviceId}|{binding.PlatformCode}"));
-        Assert.All(registered.Bindings, binding => Assert.Equal((AppBindingStatus.Active, null, null, 100, null),
-            (binding.Status, binding.StopReason, binding.CooldownUntil, binding.MinIntervalSeconds, binding.DailyQuota)));
+        Assert.All(registered.Bindings, binding => Assert.Equal((AppBindingStatus.Stopped, AppBindingStopReason.DisabledByOperator, null, 100, null),
+            (binding.Status, (AppBindingStopReason?)binding.StopReason, binding.CooldownUntil, binding.MinIntervalSeconds, binding.DailyQuota)));
         var (doubao, kimi) = (registered.Bindings[0].BindingId, registered.Bindings[1].BindingId);
         Assert.Equal("rev-1|1", await pool.RowAsync("SELECT collector_build_revision, last_seen_at IS NOT NULL FROM collector_app_nodes WHERE node_id = @node;",
             ("@node", first)));
         Assert.Equal(["binding_registered"], await pool.EventsAsync(doubao));
+        Assert.Equal("stopped|disabled_by_operator|0", await pool.ApprovalAsync(doubao));
+        // The operator approves both; from here on they behave as bindings always did.
+        Assert.True(await store.ResumeBindingAsync(doubao, null));
+        Assert.True(await store.ResumeBindingAsync(kimi, null));
+        Assert.Equal("active|-|1", await pool.ApprovalAsync(doubao));
 
         // An explicit safety cooldown remains visible. Old per-binding quota and interval are not advertised as dispatch limits.
         await pool.ExecAsync("""
@@ -121,13 +127,17 @@ public sealed partial class AppLeaseSqlTests
             Assert.Equal(AppBindingStopReason.DisabledByOperator, (await HealthAsync(health)).StopReason);
         Assert.Equal(("APP_BINDING_NOT_FOUND", 404), Code(await Assert.ThrowsAsync<CollectorStoreException>(() => store.ResumeBindingAsync(Guid.NewGuid(), null))));
 
-        // One event per state change, none for a report that changed nothing.
+        // One event per state change, none for a report that changed nothing. The eighth binding_resumed is the first one:
+        // the operator's approval of the new binding (Pool.BindAsync).
         var events = await pool.EventsAsync(binding);
-        Assert.Equal(("binding_registered", 7, 7), (events[0], events.Count(kind => kind == "binding_stopped"), events.Count(kind => kind == "binding_resumed")));
-        Assert.Equal(15, events.Length);
-        // A new binding can be registered already stopped.
+        Assert.Equal(("binding_registered", "binding_resumed", 7, 8),
+            (events[0], events[1], events.Count(kind => kind == "binding_stopped"), events.Count(kind => kind == "binding_resumed")));
+        Assert.Equal(16, events.Length);
+        // A new binding is registered waiting for approval whatever health it reports: the reported reason is not stored.
         var born = Assert.Single((await store.ReportBindingsAsync(new AppBindingReportCommand(node, "rev",
             [Report("AI_Apps_4KB", "kimi", $"kimi-{Guid.NewGuid():N}", "contract_unverified")]))).Bindings);
-        Assert.Equal("stopped|contract_unverified|1|0", await pool.BindingAsync(born.BindingId));
+        Assert.Equal((AppBindingStatus.Stopped, (AppBindingStopReason?)AppBindingStopReason.DisabledByOperator), (born.Status, born.StopReason));
+        Assert.Equal("stopped|disabled_by_operator|1|0", await pool.BindingAsync(born.BindingId));
+        Assert.Equal("stopped|disabled_by_operator|0", await pool.ApprovalAsync(born.BindingId));
     });
 }

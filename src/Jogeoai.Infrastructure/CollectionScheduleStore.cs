@@ -15,20 +15,45 @@ namespace Jogeoai.Infrastructure;
 /// <param name="keyPool">可选 Cloro key 池；提供时，含 Cloro 目标且池耗尽的时隙在预留积分前跳过。</param>
 /// <param name="providerSettings">可选 API 回答 Provider 设置店；提供时，含豆包或 DeepSeek API 目标但对应 Provider 未配置的时隙按 TARGET_UNAVAILABLE 跳过。</param>
 /// <param name="appChannel">可选的 App 渠道开放范围（Collector:AppTenantIds）；不提供时 App 渠道不对任何租户开放，App 计划的时隙按 APP_CHANNEL_NOT_OPEN 跳过。</param>
+/// <param name="scheduleOptions">可选的计划参数（Collection:Schedules）；不提供时每个站点最多 20 个自定义计划。</param>
 public sealed class CollectionScheduleStore(MySqlDatabase database, ICloroKeyPool? keyPool = null,
-    IAnswerProviderSettingsStore? providerSettings = null, IOptions<AppChannelOptions>? appChannel = null) : ICollectionScheduleStore
+    IAnswerProviderSettingsStore? providerSettings = null, IOptions<AppChannelOptions>? appChannel = null,
+    IOptions<CollectionScheduleOptions>? scheduleOptions = null) : ICollectionScheduleStore
 {
     private static readonly JsonSerializerOptions SnapshotJson = new(JsonSerializerDefaults.Web);
 
     // Same switch as ManagementStore: closed for everyone unless the tenant is listed in Collector:AppTenantIds.
     private bool AppOpen(Guid tenantId) => appChannel?.Value.IsOpen(tenantId) == true;
 
+    // Collection:Schedules:MaxCustomPerSite; a negative value is read as 0 (no custom plan can be created).
+    private int MaxCustomPerSite => Math.Max(0, scheduleOptions?.Value.MaxCustomPerSite ?? CollectionScheduleOptions.DefaultMaxCustomPerSite);
+
     /// <inheritdoc />
-    public async Task<CollectionScheduleView> CreateAsync(CreateCollectionScheduleCommand command, CancellationToken cancellationToken = default)
+    public Task<CollectionScheduleView> CreateAsync(CreateCollectionScheduleCommand command, CancellationToken cancellationToken = default)
+        => CreateCoreAsync(command, automatic: false, cancellationToken);
+
+    /// <inheritdoc />
+    public Task<CollectionScheduleView> CreateAutomaticPlanAsync(CreateCollectionScheduleCommand command, CancellationToken cancellationToken = default)
+    {
+        // A programming error, not a client error: this entry point exists only for the reserved monitoring names.
+        if (!PromptMonitoringIdentity.IsAutomaticSchedule(command.Name?.Trim()))
+            throw new ArgumentException("CreateAutomaticPlanAsync 只能创建每日监控主计划或凌晨计划。", nameof(command));
+        return CreateCoreAsync(command, automatic: true, cancellationToken);
+    }
+
+    // automatic=false is the public path (collection-schedules API): reserved names are refused and the per-site cap on
+    // custom plans applies. automatic=true is reached only through CreateAutomaticPlanAsync (PromptMonitoringService).
+    private async Task<CollectionScheduleView> CreateCoreAsync(CreateCollectionScheduleCommand command, bool automatic,
+        CancellationToken cancellationToken)
     {
         if (command.TenantId == Guid.Empty || command.SiteId == Guid.Empty) throw Bad("INVALID_SCHEDULE", "租户和站点不能为空。");
         var definition = Normalize(command.Name, command.Cadence, command.DayOfWeek, command.LocalTime,
             command.TimeZone, command.Selection, command.Enabled);
+        // The exact App plan name was already refused by Normalize (400 INVALID_SCHEDULE_NAME, unchanged). This is the
+        // cheap first pass over the spellings the name column's case- and accent-insensitive collation treats as a
+        // reserved name; it is an approximation in C#. The authoritative comparison is made by MySQL on the inserted row
+        // (HasReservedNameAsync below), before the transaction commits.
+        if (!automatic && PromptMonitoringIdentity.IsReservedScheduleName(definition.Name)) throw NameReserved();
         var now = DateTimeOffset.UtcNow;
         var next = definition.Enabled ? Next(definition, now) : (DateTimeOffset?)null;
         var id = Guid.NewGuid();
@@ -39,6 +64,15 @@ public sealed class CollectionScheduleStore(MySqlDatabase database, ICloroKeyPoo
         await using var tx = await connection.BeginTransactionAsync(IsolationLevel.ReadCommitted, cancellationToken);
         if (!await LockActiveSiteAsync(connection, tx, command.TenantId, command.SiteId, cancellationToken))
             throw new CollectorStoreException("RESOURCE_NOT_FOUND", "租户或站点不存在或未启用。", 404);
+        // Counted in the transaction that holds the site row lock taken above. That lock is shared (FOR SHARE), so it
+        // keeps the site from being archived but does not serialize two concurrent creates of the same site.
+        if (!automatic)
+        {
+            var limit = MaxCustomPerSite;
+            if (await CountCustomSchedulesAsync(connection, tx, command.TenantId, command.SiteId, cancellationToken) >= limit)
+                // There is no delete endpoint for plans, so the message must not suggest deleting one.
+                throw new CollectorStoreException("SCHEDULE_LIMIT_REACHED", $"每个品牌最多 {limit} 个自定义采集计划，请修改并复用已有计划。", 409);
+        }
         await EnsureSelectionOwnerAsync(connection, tx, command.TenantId, command.SiteId, definition.Selection, cancellationToken);
         if (!await AreTargetsEnabledAsync(connection, tx, command.TenantId, command.SiteId,
                 definition.Selection.Targets, cancellationToken))
@@ -58,6 +92,9 @@ public sealed class CollectionScheduleStore(MySqlDatabase database, ICloroKeyPoo
             sql.Parameters.AddWithValue("@now", now.UtcDateTime);
             await sql.ExecuteNonQueryAsync(cancellationToken);
         }
+        // Leaving without a commit rolls the insert back.
+        if (!automatic && await HasReservedNameAsync(connection, tx, command.TenantId, command.SiteId, id, cancellationToken))
+            throw NameReserved();
         await tx.CommitAsync(cancellationToken);
         return new CollectionScheduleView(id, command.SiteId, definition.Name, definition.Cadence,
             definition.DayOfWeek, definition.LocalTime, definition.TimeZone, definition.Selection,
@@ -131,11 +168,21 @@ public sealed class CollectionScheduleStore(MySqlDatabase database, ICloroKeyPoo
         // App plan (design 4.1): its snapshot holds App targets, which Normalize below refuses. Only its pause switch is editable.
         if (PromptMonitoringIdentity.IsAppSchedule(old.Name))
             return await UpdateAppPlanAsync(connection, tx, command, old, cancellationToken);
+        // The name decides which plan is the system-maintained monitoring plan (reconciliation, same-day guard, per-prompt
+        // scopes), so a monitoring plan keeps its name and a custom plan cannot take one. Charging does not depend on it.
+        var automatic = PromptMonitoringIdentity.IsAutomaticSchedule(old.Name);
+        if (automatic && command.Name is not null && command.Name.Trim() != old.Name)
+            throw new CollectorStoreException("SCHEDULE_NAME_LOCKED", "每日监控计划由系统维护，不能改名。", 409);
         var cadence = command.Cadence?.Trim().ToLowerInvariant();
         var definition = Normalize(command.Name ?? old.Name, command.Cadence ?? old.Cadence,
             cadence == "daily" ? null : command.DayOfWeek ?? old.DayOfWeek,
             command.LocalTime ?? old.LocalTime, command.TimeZone ?? old.TimeZone,
             command.Selection ?? old.Selection, command.Enabled ?? old.Enabled);
+        // A custom plan cannot take a reserved name (the exact App plan name was refused by Normalize above, unchanged).
+        // Only a rename is checked, so a plan that already carries such a name can still be paused or edited. As in
+        // CreateCoreAsync this is the first pass in C#; MySQL compares the updated row itself before the commit below.
+        var renamed = !automatic && command.Name is not null && definition.Name != old.Name;
+        if (renamed && PromptMonitoringIdentity.IsReservedScheduleName(definition.Name)) throw NameReserved();
         // A stale Prompt or Target must not prevent an operator from pausing a plan.
         if (definition.Enabled || command.Selection is not null)
         {
@@ -165,6 +212,9 @@ public sealed class CollectionScheduleStore(MySqlDatabase database, ICloroKeyPoo
             if (await sql.ExecuteNonQueryAsync(cancellationToken) != 1)
                 throw new CollectorStoreException("SCHEDULE_VERSION_CONFLICT", "计划版本已变化，请刷新后重试。", 409);
         }
+        // Leaving without a commit rolls the rename back.
+        if (renamed && await HasReservedNameAsync(connection, tx, command.TenantId, command.SiteId, command.ScheduleId, cancellationToken))
+            throw NameReserved();
         await tx.CommitAsync(cancellationToken);
         return new CollectionScheduleView(old.Id, old.SiteId, definition.Name, definition.Cadence,
             definition.DayOfWeek, definition.LocalTime, definition.TimeZone, definition.Selection,
@@ -402,13 +452,36 @@ public sealed class CollectionScheduleStore(MySqlDatabase database, ICloroKeyPoo
         // this transaction, so the run and the completed slot commit together.
         if (PromptMonitoringIdentity.IsAppSchedule(scheduleName))
         {
-            var cycle = await AppCollectionStore.CreateCycleRunAsync(connection, tx,
-                new AppCollectionStore.CycleSlot(tenantId, siteId, scheduleId, keyPart, timeZone, selection), AppOpen(tenantId),
-                enabled && await IsSiteActiveForSlotAsync(connection, tx, siteId, cancellationToken), cancellationToken);
-            await FinishSlotAsync(connection, tx, slot.Id, cycle.RunId is null ? "skipped" : "completed", cycle.RunId, cancellationToken,
-                cycle.SkipCode, cycle.SkipMessage);
-            await tx.CommitAsync(cancellationToken);
-            return cycle.RunId is not null;
+            // Two App slots of one brand (a regular 09:11 slot and an instant slot) both read which prompt × platform pairs are
+            // already covered; a brand-level App lock keeps them from expanding concurrently and queueing a pair twice. It is not
+            // the prompt-monitor lock, so a large App expansion never makes Ensure or the API instant collection busy.
+            var appLock = AppCycleLockName(siteId);
+            if (!await TryAcquireNamedLockAsync(connection, tx, appLock, cancellationToken))
+            {
+                await tx.RollbackAsync(cancellationToken);
+                return false;
+            }
+            bool created;
+            try
+            {
+                var cycle = await AppCollectionStore.CreateCycleRunAsync(connection, tx,
+                    new AppCollectionStore.CycleSlot(tenantId, siteId, scheduleId, keyPart, timeZone, selection), AppOpen(tenantId),
+                    enabled && await IsSiteActiveForSlotAsync(connection, tx, siteId, cancellationToken), cancellationToken);
+                await FinishSlotAsync(connection, tx, slot.Id, cycle.RunId is null ? "skipped" : "completed", cycle.RunId, cancellationToken,
+                    cycle.SkipCode, cycle.SkipMessage);
+                await tx.CommitAsync(cancellationToken);
+                created = cycle.RunId is not null;
+            }
+            finally
+            {
+                await ReleaseNamedLockAsync(connection, tx, appLock);
+            }
+            // Changes saved while this slot was pending (or its regular slot was due) were not given an instant slot; look again
+            // now that it is done (11-27-app-first-cycle-now). Best effort: the next lazy reconcile repeats it.
+            if (AppOpen(tenantId))
+                try { await AppMonitoringPlan.ReconcileAsync(database, tenantId, siteId, true, false, cancellationToken); }
+                catch (Exception exception) when (exception is CollectorStoreException or DbException) { }
+            return created;
         }
         var automatic = PromptMonitoringIdentity.IsAutomaticSchedule(scheduleName);
         var monitoringLock = automatic
@@ -525,15 +598,16 @@ public sealed class CollectionScheduleStore(MySqlDatabase database, ICloroKeyPoo
         return old with { Enabled = enabled, NextSlotAt = next, Version = old.Version + 1, UpdatedAt = now };
     }
 
-    // The frozen slot request: automatic monitoring passes its per-prompt targets so the Run expands only allowed pairs.
-    // Custom (non-monitoring) plans stay a full cartesian product and are never charged.
+    // The frozen slot request. Every plan's slot run reserves credits: charging never depends on the plan name.
+    // Only automatic monitoring passes its per-prompt targets so the Run expands the allowed pairs; custom plans have no
+    // per-prompt scope and stay a full cartesian product.
     internal static CreateCloroVisibilityRunCommand SlotRunCommand(Guid tenantId, Guid siteId, Guid scheduleId, string scheduleName,
         string localSlotKey, CollectionScheduleSelection selection)
     {
         var monitoring = PromptMonitoringIdentity.IsAutomaticSchedule(scheduleName);
         return new CreateCloroVisibilityRunCommand(tenantId, siteId, selection.PromptIds, selection.Targets,
             $"schedule:{scheduleId:N}:{localSlotKey}", $"schedule:{scheduleId:N}", selection.SampleCount, RequireEnabledTargets: true,
-            ChargeMonitoringCredits: monitoring, PromptTargetKeys: monitoring && selection.PromptTargets is { Count: > 0 } ? selection.PromptTargets : null);
+            ChargeMonitoringCredits: true, PromptTargetKeys: monitoring && selection.PromptTargets is { Count: > 0 } ? selection.PromptTargets : null);
     }
 
     // Advisory only: an unreadable or unmigrated pool must not block schedules; the task path still handles it.
@@ -574,6 +648,24 @@ public sealed class CollectionScheduleStore(MySqlDatabase database, ICloroKeyPoo
             return availability.CreditsExhausted;
         }
         catch (Exception exception) when (exception is CollectorStoreException or DbException) { return false; }
+    }
+
+    // Serializes the expansion of a brand's App slots (regular and instant) across workers.
+    private static string AppCycleLockName(Guid siteId) => $"app-cycle:{siteId:N}";
+
+    // GET_LOCK without waiting, like TryAcquireMonitoringLockAsync; session-scoped, released by ReleaseNamedLockAsync.
+    private static async Task<bool> TryAcquireNamedLockAsync(MySqlConnection connection, MySqlTransaction tx, string name, CancellationToken ct)
+    {
+        await using var acquire = Command(connection, tx, "SELECT GET_LOCK(@name, 0);");
+        acquire.Parameters.AddWithValue("@name", name);
+        return Convert.ToInt32(await acquire.ExecuteScalarAsync(ct), CultureInfo.InvariantCulture) == 1;
+    }
+
+    private static async Task ReleaseNamedLockAsync(MySqlConnection connection, MySqlTransaction tx, string name)
+    {
+        await using var release = Command(connection, tx.Connection is null ? null : tx, "SELECT RELEASE_LOCK(@name);");
+        release.Parameters.AddWithValue("@name", name);
+        await release.ExecuteScalarAsync(CancellationToken.None);
     }
 
     private static async Task<bool> TryAcquireMonitoringLockAsync(MySqlConnection connection, MySqlTransaction tx,
@@ -796,6 +888,44 @@ public sealed class CollectionScheduleStore(MySqlDatabase database, ICloroKeyPoo
             throw new CollectorStoreException("RESOURCE_NOT_FOUND", "租户或站点不存在或未启用。", 404);
     }
 
+    // The authoritative reserved-name check for a custom plan. The row written in this transaction is compared by MySQL
+    // in the name column's own collation, which is exactly the comparison every `name = @name` plan lookup makes
+    // (reconciliation, main and night plan ids). PromptMonitoringIdentity.IsReservedScheduleName only approximates that
+    // collation: letters without a Unicode decomposition that it weighs like a base letter (such as "ø" and "o"), or
+    // characters it ignores, would pass the C# check. The caller throws without committing, so nothing is kept.
+    private static async Task<bool> HasReservedNameAsync(MySqlConnection connection, MySqlTransaction tx,
+        Guid tenantId, Guid siteId, Guid scheduleId, CancellationToken ct)
+    {
+        await using var sql = Command(connection, tx, """
+            SELECT COUNT(*) FROM collection_schedules
+            WHERE id=UUID_TO_BIN(@id) AND tenant_id=UUID_TO_BIN(@tenant) AND site_id=UUID_TO_BIN(@site)
+              AND name IN (@main, @night, @app);
+            """);
+        sql.Parameters.AddWithValue("@id", scheduleId.ToString());
+        sql.Parameters.AddWithValue("@tenant", tenantId.ToString());
+        sql.Parameters.AddWithValue("@site", siteId.ToString());
+        sql.Parameters.AddWithValue("@main", PromptMonitoringIdentity.ScheduleName);
+        sql.Parameters.AddWithValue("@night", PromptMonitoringIdentity.NightScheduleName);
+        sql.Parameters.AddWithValue("@app", PromptMonitoringIdentity.AppScheduleName);
+        return Convert.ToInt32(await sql.ExecuteScalarAsync(ct), CultureInfo.InvariantCulture) != 0;
+    }
+
+    // Custom plans of the site: every plan whose name is not one of the three system-maintained names, enabled or not.
+    private static async Task<int> CountCustomSchedulesAsync(MySqlConnection connection, MySqlTransaction tx,
+        Guid tenantId, Guid siteId, CancellationToken ct)
+    {
+        await using var sql = Command(connection, tx, """
+            SELECT COUNT(*) FROM collection_schedules
+            WHERE tenant_id=UUID_TO_BIN(@tenant) AND site_id=UUID_TO_BIN(@site) AND name NOT IN (@main, @night, @app);
+            """);
+        sql.Parameters.AddWithValue("@tenant", tenantId.ToString());
+        sql.Parameters.AddWithValue("@site", siteId.ToString());
+        sql.Parameters.AddWithValue("@main", PromptMonitoringIdentity.ScheduleName);
+        sql.Parameters.AddWithValue("@night", PromptMonitoringIdentity.NightScheduleName);
+        sql.Parameters.AddWithValue("@app", PromptMonitoringIdentity.AppScheduleName);
+        return Convert.ToInt32(await sql.ExecuteScalarAsync(ct), CultureInfo.InvariantCulture);
+    }
+
     private static async Task<bool> LockActiveSiteAsync(MySqlConnection connection, MySqlTransaction tx,
         Guid tenantId, Guid siteId, CancellationToken ct)
     {
@@ -867,6 +997,8 @@ public sealed class CollectionScheduleStore(MySqlDatabase database, ICloroKeyPoo
     private static MySqlCommand Command(MySqlConnection connection, MySqlTransaction? tx, string sql) => new(sql, connection, tx);
     private static DateTimeOffset Utc(DateTime value) => new(DateTime.SpecifyKind(value, DateTimeKind.Utc));
     private static CollectorStoreException Bad(string code, string message) => new(code, message, 400);
+    private static CollectorStoreException NameReserved() =>
+        new("SCHEDULE_NAME_RESERVED", "该计划名称为系统维护的监控计划保留，不能使用。", 409);
 
     private sealed record ScheduleDefinition(string Name, string Cadence, int? DayOfWeek, string LocalTime,
         string TimeZone, CollectionScheduleSelection Selection, bool Enabled);

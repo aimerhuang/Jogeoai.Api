@@ -34,6 +34,7 @@ public sealed class AppChannelApiDocumentationTests(ITestOutputHelper output)
     [
         (AdminPrefix + "nodes", "get"), (AdminPrefix + "nodes", "post"), (AdminPrefix + "nodes/{nodeId}/token", "post"),
         (AdminPrefix + "nodes/{nodeId}/disable", "post"), (AdminPrefix + "nodes/{nodeId}/resume", "post"),
+        (AdminPrefix + "nodes/{nodeId}/max-devices", "put"),
         (AdminPrefix + "bindings", "get"), (AdminPrefix + "bindings/{bindingId}/disable", "post"),
         (AdminPrefix + "bindings/{bindingId}/resume", "post"), (AdminPrefix + "bindings/{bindingId}/limits", "put"),
         (AdminPrefix + "platforms", "get"), (AdminPrefix + "platforms/{platformCode}/pause", "post"),

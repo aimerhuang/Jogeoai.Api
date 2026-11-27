@@ -311,7 +311,7 @@ public sealed record CollectionTargetUnavailableReason(string Code, string Messa
 public sealed record CollectionSelection(IReadOnlyList<Guid>? PromptIds, IReadOnlyList<Guid>? TagIds,
     IReadOnlyList<Guid>? TargetIds, int SampleCount = 1);
 
-/// <summary>固定规模预览，价格未知时保持空值。</summary>
+/// <summary>固定规模预览，含按此预览创建运行时预计预占的积分。</summary>
 /// <param name="PreviewId">预览标识。</param>
 /// <param name="SiteId">品牌工作区标识。</param>
 /// <param name="PromptIds">固定的 Prompt 集合。</param>
@@ -319,7 +319,7 @@ public sealed record CollectionSelection(IReadOnlyList<Guid>? PromptIds, IReadOn
 /// <param name="SampleCount">每组回答样本数。</param>
 /// <param name="ExpectedChecks">预期 Check 数。</param>
 /// <param name="EstimatedUnits">预计 Provider 调用单位。</param>
-/// <param name="EstimatedAmount">预计金额；未知时为空。</param>
+/// <param name="EstimatedAmount">预计预占的积分：预期检测数 × 每日监控单价（10）；按此预览创建运行时预占同样的数额。</param>
 /// <param name="Availability">所选目标可用性。</param>
 /// <param name="SubjectConfigVersion">主体配置版本。</param>
 /// <param name="ExpiresAt">预览过期 UTC 时间。</param>

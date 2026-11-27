@@ -39,7 +39,7 @@ public sealed partial class AppCycleRunSqlTests
 
         // ---- One worker pass over the brand's two due slots.
         Assert.True(await rig.Schedules.MaterializeDueSlotsAsync(Utc(3, 3, 0), 10) >= 2);
-        var slots = (await rig.Schedules.GetPendingSlotsAsync(100)).Where(slot => slot.ScheduleId == main || slot.ScheduleId == app).ToArray();
+        var slots = ((await rig.Schedules.GetPendingSlotsAsync(100)).Regular()).Where(slot => slot.ScheduleId == main || slot.ScheduleId == app).ToArray();
         Assert.Equal(2, slots.Length);
         foreach (var slot in slots) Assert.True(await rig.Schedules.ProcessSlotAsync(slot, rig.Runs));
 

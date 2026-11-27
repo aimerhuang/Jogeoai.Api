@@ -5,7 +5,11 @@ namespace Jogeoai.Application;
 /// <summary>品牌研究任务和全局 Provider 配置的持久化合同。</summary>
 public interface IResearchStore
 {
-    /// <summary>创建一个品牌研究任务。</summary>
+    /// <summary>
+    /// 创建一个品牌研究任务。相同 refreshKey 与相同内容的重放返回原任务且不计入额度；否则在站点行锁内依次检查：
+    /// 站点已有 pending / running 任务时抛出 <see cref="ResearchAlreadyActiveException"/>（409 RESEARCH_ALREADY_ACTIVE，带现有任务标识），
+    /// 租户滚动 24 小时内的任务数达到上限时抛出 429 RESEARCH_DAILY_LIMIT。
+    /// </summary>
     Task<BrandResearchAccepted> EnqueueAsync(Guid tenantId, Guid siteId, Guid userId, StartBrandResearchRequest request,
         CancellationToken cancellationToken = default);
 
@@ -15,7 +19,10 @@ public interface IResearchStore
     /// <summary>取消等待中的研究任务。</summary>
     Task<bool> CancelAsync(Guid tenantId, Guid siteId, Guid jobId, CancellationToken cancellationToken = default);
 
-    /// <summary>领取一个待处理研究任务。</summary>
+    /// <summary>
+    /// 领取一个待处理研究任务；租户之间按“最近最少被服务的租户优先”轮转（从未被服务过的租户按任务创建时间参与排序，不插队），
+    /// 同一租户内按创建顺序。
+    /// </summary>
     Task<ResearchWorkItem?> LeaseAsync(string workerId, TimeSpan leaseDuration, CancellationToken cancellationToken = default);
 
     /// <summary>续期当前租约；取消、过期或被重新领取时返回 false。</summary>

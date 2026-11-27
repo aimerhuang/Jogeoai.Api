@@ -26,7 +26,7 @@ public sealed record AppPlatformEstimate(string Engine, long WeeklyCapacity, lon
 /// <param name="ExcludedPrompts">不进入 App 渠道的启用提问（只数平台范围包含至少一个草稿 App 单元格的提问），按原因码汇总，按原因码排序；没有时为空列表。</param>
 /// <param name="Platforms">草稿中每个已启用 App 单元格所在平台的容量，按目录顺序排列。</param>
 /// <param name="FirstResultAt">预计首次结果时间（UTC）：草稿 App 单元格里预计排得到检测的那些，下一个 App 时隙（计划时区 09:11）中最早的一个；
-/// 新启用的 App 目标从次日开始第一个周期。没有预计排得到的检测时为空。</param>
+/// 新启用的 App 目标在保存后立即开始第一个周期（即时时隙），此时为当前时刻。没有预计排得到的检测时为空。</param>
 public sealed record AppChannelEstimate(int Targets, decimal WeeklyChecks, decimal WeeklyCredits, IReadOnlyList<AppReasonCount> ExcludedPrompts,
     IReadOnlyList<AppPlatformEstimate> Platforms, DateTimeOffset? FirstResultAt);
 

@@ -99,7 +99,7 @@ public sealed partial class AppCycleRunSqlTests
         foreach (var worker in new[] { rig, Build(cs, rig.Tenant, open: false) })
         {
             await ExecAsync(cs, "UPDATE schedule_slots SET status = 'pending', run_id = NULL WHERE id = UUID_TO_BIN(@slot);", ("@slot", slot.Id.ToString()));
-            var pending = Assert.Single(await worker.Schedules.GetPendingSlotsAsync(100), s => s.Id == slot.Id);
+            var pending = Assert.Single((await worker.Schedules.GetPendingSlotsAsync(100)).Regular(), s => s.Id == slot.Id);
             Assert.True(await worker.Schedules.ProcessSlotAsync(pending, worker.Runs));
             Assert.Equal(slot, await SlotAsync(cs, plan, "20000103T0911"));
             Assert.Equal(Footprint(1, 3), await FootprintAsync(cs, rig.Tenant));

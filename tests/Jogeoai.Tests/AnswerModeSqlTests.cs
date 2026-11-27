@@ -182,7 +182,7 @@ public sealed class AnswerModeSqlTests
                 [ChatGpt, DeepSeekDeep with { Frequency = MonitoringFrequency.TwiceDaily }], SiteTargetsScope.Monitoring));
             Assert.Null(await NightAsync(cs, site));
 
-            var main = await schedules.CreateAsync(new CreateCollectionScheduleCommand(tenant, site, PromptMonitoringIdentity.ScheduleName,
+            var main = await schedules.CreateAutomaticPlanAsync(new CreateCollectionScheduleCommand(tenant, site, PromptMonitoringIdentity.ScheduleName,
                 "daily", null, PromptMonitoringIdentity.MainLocalTime, Zone, new CollectionScheduleSelection([prompt], [ChatGptTarget]), Enabled: true));
             view = await store.PutSiteTargetsAsync(tenant, site, new SiteTargetsWrite(view.ConfigVersion,
                 [ChatGpt, DeepSeekDeep with { Frequency = MonitoringFrequency.TwiceDaily }], SiteTargetsScope.Monitoring));
@@ -231,7 +231,7 @@ public sealed class AnswerModeSqlTests
         var weeklyFast = DeepSeekFast with { Frequency = MonitoringFrequency.Weekly };
         var view = await store.GetSiteTargetsAsync(tenant, site);
         view = await store.PutSiteTargetsAsync(tenant, site, new SiteTargetsWrite(view.ConfigVersion, [ChatGpt, weeklyFast], SiteTargetsScope.Monitoring));
-        var main = await schedules.CreateAsync(new CreateCollectionScheduleCommand(tenant, site, PromptMonitoringIdentity.ScheduleName,
+        var main = await schedules.CreateAutomaticPlanAsync(new CreateCollectionScheduleCommand(tenant, site, PromptMonitoringIdentity.ScheduleName,
             "daily", null, PromptMonitoringIdentity.MainLocalTime, Zone, new CollectionScheduleSelection([prompt], [ChatGptTarget]), Enabled: true));
         try
         {
@@ -311,7 +311,7 @@ public sealed class AnswerModeSqlTests
         {
             var view = await store.GetSiteTargetsAsync(tenant, site);
             view = await store.PutSiteTargetsAsync(tenant, site, new SiteTargetsWrite(view.ConfigVersion, [ChatGpt], SiteTargetsScope.Monitoring));
-            await new CollectionScheduleStore(database).CreateAsync(new CreateCollectionScheduleCommand(tenant, site, PromptMonitoringIdentity.ScheduleName,
+            await new CollectionScheduleStore(database).CreateAutomaticPlanAsync(new CreateCollectionScheduleCommand(tenant, site, PromptMonitoringIdentity.ScheduleName,
                 "daily", null, PromptMonitoringIdentity.MainLocalTime, planZone, new CollectionScheduleSelection([prompt], [ChatGptTarget]), Enabled: true));
             await ExecAsync(cs, "UPDATE site_brand_settings SET time_zone=@zone WHERE site_id=UUID_TO_BIN(@site);",
                 ("@zone", brandZone), ("@site", site.ToString()));

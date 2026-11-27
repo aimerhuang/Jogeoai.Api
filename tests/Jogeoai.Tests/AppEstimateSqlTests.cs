@@ -139,7 +139,9 @@ public sealed class AppEstimateSqlTests
         SiteTargetWrite[] apiDraft = [ChatGpt];
         SiteTargetWrite[] draft = [ChatGpt, App("doubao"), App("kimi")];
         var apiOnly = await service.EstimateTargetsAsync(a, brand, new MonitoringTargetsEstimateRequest(apiDraft));
+        var before = DateTimeOffset.UtcNow;
         var estimate = await service.EstimateTargetsAsync(a, brand, new MonitoringTargetsEstimateRequest(draft));
+        var after = DateTimeOffset.UtcNow;
 
         // API part: ChatGPT takes the four 'all' prompts (the kimi-only prompt has no API pair): 28 a week, and every API member
         // of the response is what the API-only draft gives.
@@ -160,9 +162,9 @@ public sealed class AppEstimateSqlTests
         Assert.Equal([new AppReasonCount(AppPromptRules.ReasonExcludedByOperator, 1), new AppReasonCount(AppPromptRules.ReasonTooLong, 1)],
             app.ExcludedPrompts);
         Assert.Equal((30m, 300m), (estimate.WeeklyChecks, estimate.WeeklyCredits));
-        // The targets were enabled today, so their first cycle is tomorrow at 09:11 (design 3.5).
-        var today = ManagementStore.BrandLocalDate(Zone, DateTimeOffset.UtcNow);
-        Assert.Equal(AppCycleCalendar.SlotUtc(today.AddDays(1), CollectionScheduleCalendar.ParseTimeZone(Zone)), app.FirstResultAt);
+        // The targets were enabled today and no cycle covers them yet, so their first cycle starts at once through an instant
+        // slot (11-27-app-first-cycle-now): the first result is expected now.
+        Assert.InRange(app.FirstResultAt!.Value, before, after);
 
         // The capacity view (the 8B entry point) reads the same: stored demand of the open tenants, one binding.
         var capacities = await new AppCapacityQuery(database, AppSiteTargetsSqlTests.OpenFor(a, b)).GetPlatformCapacitiesAsync();
@@ -236,7 +238,11 @@ public sealed class AppEstimateSqlTests
         // The row's breakdown is the brand estimate's own on the materialized draft.
         var materialized = (await store.MaterializeTeamCellsForFollowersAsync(a,
             [new("cloro", "chatgpt"), new("app_collector", "doubao", null, MonitoringFrequency.Weekly)])).Single().Targets;
-        Assert.Equal(Json(row.Channels), Json((await service.EstimateTargetsAsync(a, follower, new MonitoringTargetsEstimateRequest(materialized))).Channels!));
+        // FirstResultAt is "now" for a cell that starts with an instant slot (11-27-app-first-cycle-now), so it is compared apart.
+        static MonitoringEstimateChannels WithoutFirstResult(MonitoringEstimateChannels channels) => channels with { App = channels.App with { FirstResultAt = null } };
+        var brandEstimate = (await service.EstimateTargetsAsync(a, follower, new MonitoringTargetsEstimateRequest(materialized))).Channels!;
+        Assert.Equal(Json(WithoutFirstResult(row.Channels)), Json(WithoutFirstResult(brandEstimate)));
+        Assert.Equal((row.Channels.App.FirstResultAt is null), (brandEstimate.App.FirstResultAt is null));
 
         // A tenant the App channel is not open for cannot estimate App cells (as before); its API-only estimate has no channels.
         var refused = await Assert.ThrowsAsync<CollectorStoreException>(() => service.EstimateTargetsAsync(c, closed, new MonitoringTargetsEstimateRequest([ChatGpt, App("doubao")])));

@@ -8,7 +8,7 @@ using static Jogeoai.Tests.TeamMonitoringConfigSqlTests;
 namespace Jogeoai.Tests;
 
 /// <summary>
-/// 隔离库（已执行 001–049、库名含 _test）上的 App 全局账号池（implement 阶段 5）：节点令牌、绑定登记、领取的评估顺序、
+/// 隔离库（已执行 001–052、库名含 _test）上的 App 全局账号池（implement 阶段 5）：节点令牌、绑定登记、领取的评估顺序、
 /// 排队顺序、过期租约、失败上报的处理矩阵、与网页渠道的隔离。未设置 JOGEOAI_APP_CHANNEL_TEST_CONNECTION 时跳过，绝不使用业务库 jogeoai。
 /// 每个用例只用自己新建的租户、节点和绑定，结束时删除它们写下的全部行（含审计事件），把平台闸门和 App 入口恢复成用例开始前的内容，
 /// 并核对整库每张表的行数与用例开始前相同。时间推进靠改写数据库里的时间戳，不用 sleep。与迁移用例同一个集合：它们会执行 DDL。
@@ -28,24 +28,47 @@ public sealed partial class AppLeaseSqlTests
         /// <summary>The pool store with Collector:AppTenantIds set to the given tenants.</summary>
         public AppCollectorPoolStore Store(params Guid[] openTenants) => new(Database, AppSiteTargetsSqlTests.OpenFor(openTenants));
 
-        public async Task<(string NodeId, string Token)> NodeAsync(string name)
+        /// <summary>
+        /// Registers a node. Since migration 052 a node may register 4 devices by default; most cases are not about that cap
+        /// and use more devices, so the cap of a test node is lifted to the maximum (written directly, like the other fixture
+        /// knobs: no audit event). A case about the cap itself passes <paramref name="defaultDeviceCap"/> = true.
+        /// </summary>
+        public async Task<(string NodeId, string Token)> NodeAsync(string name, bool defaultDeviceCap = false)
         {
             var nodeId = $"{name}-{Guid.NewGuid():N}";
             nodes.Add(nodeId);
             var credential = await Store().RegisterNodeAsync(nodeId, null);
+            if (!defaultDeviceCap)
+                await ExecAsync("UPDATE collector_app_nodes SET max_devices = @max WHERE node_id = @node;",
+                    ("@max", AppPoolRules.MaxDevicesPerNodeLimit), ("@node", nodeId));
             return (credential.NodeId, credential.Token);
         }
 
         public void Track(string nodeId) => nodes.Add(nodeId);
 
-        /// <summary>Reports one healthy binding and returns its id.</summary>
-        public async Task<Guid> BindAsync(string nodeId, string device, string platform, string? label = null)
+        /// <summary>
+        /// Reports one healthy binding and returns its id. Since migration 052 a reported binding waits for the operator's
+        /// approval, so by default it is approved here, through the store method behind the admin resume endpoint (an extra
+        /// binding_resumed event with actor "operator"). A case about the state before approval passes
+        /// <paramref name="approve"/> = false.
+        /// </summary>
+        public async Task<Guid> BindAsync(string nodeId, string device, string platform, string? label = null, bool approve = true)
         {
             var result = await Store().ReportBindingsAsync(new AppBindingReportCommand(nodeId, "test-rev",
                 [new AppBindingReport(device, platform, label ?? $"{platform}-{Guid.NewGuid():N}", $"pkg.{platform}", "1.0", "1.0", "15", "ok")]));
             Assert.Empty(result.Rejected);
-            return Assert.Single(result.Bindings).BindingId;
+            var binding = Assert.Single(result.Bindings).BindingId;
+            // Only a binding that has never been approved is approved here; reporting an existing binding again changes nothing.
+            if (approve && await CountAsync("SELECT COUNT(*) FROM collector_app_bindings WHERE id = UUID_TO_BIN(@id) AND approved_at IS NULL;",
+                    ("@id", binding.ToString())) == 1)
+                Assert.True(await Store().ResumeBindingAsync(binding, null));
+            return binding;
         }
+
+        /// <summary>status | stop_reason | approved (0/1), for the cases about approval.</summary>
+        public Task<string> ApprovalAsync(Guid binding)
+            => RowAsync("SELECT status, COALESCE(stop_reason, '-'), approved_at IS NOT NULL FROM collector_app_bindings WHERE id = UUID_TO_BIN(@id);",
+                ("@id", binding.ToString()));
 
         public Task ExecAsync(string sql, params (string Name, object? Value)[] args) => TeamMonitoringConfigSqlTests.ExecAsync(cs, sql, args);
 

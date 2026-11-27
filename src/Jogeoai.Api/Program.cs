@@ -2,6 +2,7 @@ using Jogeoai.Infrastructure;
 using Jogeoai.Api;
 using Jogeoai.Api.Authorization;
 using Jogeoai.Api.Mcp;
+using Jogeoai.Api.Security;
 using Jogeoai.Application;
 using Jogeoai.Providers.Abstractions;
 using Jogeoai.Providers.Cloro;
@@ -25,9 +26,16 @@ builder.Services.AddSingleton<ICollectorSessionPoolStore, CollectorSessionPoolSt
 builder.Services.AddSingleton<ICloroVisibilityStore, CloroVisibilityStore>();
 builder.Services.AddSingleton<IVisibilityRunQueryStore, VisibilityRunQueryStore>();
 // App 渠道的开放范围：Collector:AppTenantIds 的形态与解析同 Collector:ChinaTenantIds，但为空或缺失表示不对任何租户开放。
+// AppChannel:MaxLeaseTotalSeconds：一次 App 租约从领取起最多续到多少秒（900–86400，默认 1800）；取值无效时在这里启动失败。
+var appMaxLeaseTotalSeconds = AppChannelOptions.ParseMaxLeaseTotalSeconds(builder.Configuration[AppChannelOptions.MaxLeaseTotalSecondsKey]);
 builder.Services.Configure<AppChannelOptions>(options =>
-    options.AppTenantIds = builder.Configuration.GetSection(AppChannelOptions.TenantIdsKey).Get<string[]>() ?? []);
+{
+    options.AppTenantIds = builder.Configuration.GetSection(AppChannelOptions.TenantIdsKey).Get<string[]>() ?? [];
+    options.MaxLeaseTotalSeconds = appMaxLeaseTotalSeconds;
+});
 builder.Services.AddSingleton<IManagementStore, ManagementStore>();
+// 采集计划参数：Collection:Schedules:MaxCustomPerSite（每个站点的自定义计划数量上限，默认 20）。
+builder.Services.Configure<CollectionScheduleOptions>(builder.Configuration.GetSection(CollectionScheduleOptions.SectionName));
 builder.Services.AddSingleton<ICollectionScheduleStore, CollectionScheduleStore>();
 builder.Services.AddSingleton<IAppCollectionStore, AppCollectionStore>();
 // App 全局账号池（迁移 049）：节点令牌鉴权、绑定登记、领取、续租与失败上报；未迁移时这些接口返回 503。
@@ -68,13 +76,12 @@ builder.Services.Configure<SubscriptionOptions>(builder.Configuration.GetSection
 builder.Services.AddSingleton<ISubscriptionStore, SubscriptionStore>();
 builder.Services.Configure<RegistrationEmailOptions>(builder.Configuration.GetSection("Email"));
 builder.Services.AddSingleton<IRegistrationEmailSender, RegistrationEmailSender>();
+// 采集接口限流阈值（Collector:RateLimit:PermitPerMinute，缺省 600）：不是不小于 1 的整数时在这里抛出，应用不启动。
+var collectorPermitPerMinute = CollectorRateLimit.ParsePermitPerMinute(builder.Configuration);
 builder.Services.AddRateLimiter(options =>
 {
-    options.OnRejected = async (context, cancellationToken) =>
-    {
-        context.HttpContext.Response.StatusCode = 429;
-        await context.HttpContext.Response.WriteAsJsonAsync(new { error = new { code = "RATE_LIMITED", message = "请求过于频繁，请稍后重试。" } }, cancellationToken);
-    };
+    // 所有策略共用：429、Retry-After 与 RATE_LIMITED 错误体。
+    options.OnRejected = RateLimitRejection.WriteAsync;
     options.AddPolicy("registration-email", context => RateLimitPartition.GetFixedWindowLimiter(
         context.Connection.RemoteIpAddress?.ToString() ?? "unknown", _ => new FixedWindowRateLimiterOptions
         { PermitLimit = 20, Window = TimeSpan.FromHours(1), QueueLimit = 0 }));
@@ -84,8 +91,13 @@ builder.Services.AddRateLimiter(options =>
     options.AddPolicy(BrandRecognitionRateLimit.Policy, BrandRecognitionRateLimit.Partition);
     options.AddPolicy(PromptSuggestionsRateLimit.Policy, PromptSuggestionsRateLimit.Partition);
     options.AddMcpTokenPolicy();
+    // /internal/collector 下的全部接口（含 health）按客户端 IP 限流；分区键是转发头中间件处理后的 Connection.RemoteIpAddress。
+    // 没有启用受信转发头，或处理后的地址仍是受信代理（网关没有给出客户端地址）时不限流，见 CollectorRateLimit.LimitedClient。
+    options.AddCollectorInternalPolicy(collectorPermitPerMinute);
 });
 builder.Services.AddSingleton<TenantContextResolver>();
+// 品牌研究入队额度（Research:Quota:MaxActivePerSite 默认 1、DailyPerTenant 默认 20）：任一数值小于 1 时应用不启动。
+builder.Services.AddResearchQuota(builder.Configuration);
 builder.Services.AddSingleton<IResearchStore, ResearchStore>();
 builder.Services.AddSingleton<IOnboardingProgressStore, OnboardingProgressStore>();
 builder.Services.AddSingleton<IResearchProvider, OpenAiCompatibleResearchProvider>();
@@ -196,6 +208,10 @@ builder.Services.AddSwaggerGen(options =>
         Path.Combine(AppContext.BaseDirectory, "Jogeoai.Providers.Domestic.xml"));
 });
 
+// 受信转发头（ForwardedHeaders:KnownProxies / KnownNetworks / ForwardLimit）：两个列表都为空时不处理任何 X-Forwarded-*；
+// 某一项无法解析或 ForwardLimit 超出 1–5 时在这里抛出，应用不启动。
+builder.Services.AddJogeoaiForwardedHeaders(builder.Configuration);
+
 var allowedCorsOrigins = builder.Configuration
     .GetSection("Cors:AllowedOrigins")
     .Get<string[]>() ?? [];
@@ -235,10 +251,15 @@ app.Services.GetRequiredService<ArticleSourceAddressPolicy>();
 await database.EnsureSchemaAsync();
 
 // Configure the HTTP request pipeline.
+// 必须是第一个中间件：之后的 CORS、会话、限流分区、HTTPS 重定向和 Controller 读到的都是处理后的客户端 IP 与协议。
+app.UseJogeoaiForwardedHeaders();
+// 没有启用受信转发头时采集接口的应用内限流不生效：记录一行日志（Development 为 Information，其他环境为 Warning）。
+CollectorRateLimit.LogStartupState(app.Services, app.Environment);
 app.UseCors("Frontend");
 
 // User sessions are server-side records; this middleware only loads a valid
 // session into the request context and never trusts a client-supplied user ID.
+// /internal 与 /mcp 不使用用户会话：中间件对这两个前缀直接放行，不查 auth_sessions。
 app.UseMiddleware<SessionAuthenticationMiddleware>();
 // /mcp 只认 MCP 令牌（清除会话身份后按令牌哈希校验，失败直接 401）；必须在限流之前，限流才能按令牌分区。其他路径不经过此中间件。
 app.UseMcpTokenAuthentication();

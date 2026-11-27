@@ -119,6 +119,13 @@ stops it. `ExitTimeOut` gives the in-flight question its grace period (10 minute
   account label in this run. If `app_result_waiting_for_binding` appears after an account change,
   restore the original login and label before retrying. A late answer to an expired lease is
   `stale`: it is kept for audit and doesn't overwrite anything.
+- A contract with `links` (Doubao, task 11-24) opens every source to read its link, which can
+  keep a device on one task for minutes after the answer is complete: up to the contract's
+  `budgetSeconds` (default 180) on top of reading the source list. Heartbeats renew the lease
+  meanwhile. A stop request ends the link read before the next source, so the answer is still
+  submitted within the grace period. Only the source's address (`url`) is submitted; the copied
+  text and the cause words stay in the local record. See
+  [app-channel-local.md](app-channel-local.md), "Links read by opening sources".
 
 ## Failures
 

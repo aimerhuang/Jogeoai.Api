@@ -285,7 +285,31 @@ export interface MockSource {
   // Own height of this source's card in a list of equally tall cards, where it is not the usual
   // one: the first and the last card of a real list carry the list's padding.
   cardHeight?: number;
+  // With `sourcePages`: what "copy link" on this source's page puts on the clipboard. Absent:
+  // the copy closes the share sheet and leaves the clipboard as it was.
+  link?: string;
+  // With `sourcePages`: this source's page has no share control.
+  noShare?: boolean;
+  // With `sourcePages`: this many taps on its title open nothing (Infinity: none ever does).
+  deadTaps?: number;
+  // With `sourcePages`: this many taps on "copy link" do nothing, and the sheet stays open.
+  copyMisses?: number;
+  // With `sourcePages`: the page's share control opens Android's own share sheet in its own
+  // package (real device, Android 15: `com.android.intentresolver`) instead of the App's. Its
+  // copy button puts `link` on the clipboard; "dismisses": the sheet then closes itself, "stays":
+  // it stays until the back key is pressed.
+  systemShare?: "dismisses" | "stays";
+  // With `sourcePages`: a tap on the title opens another App instead of a page. "returns": the
+  // back key leads back to the panel; "stays": the back key does nothing.
+  opensApp?: "returns" | "stays";
+  // With `sourcePages`: a tap on "copy link" lands on the sheet's "more" instead, which opens
+  // Android's own share sheet (one reading of the real-device smoke of 2026-11-25). That sheet
+  // behaves as with `systemShare` ("stays" where that is absent).
+  copyOpensChooser?: boolean;
 }
+// The package of Android's own share sheet, and of the App a source can open instead of a page.
+export const MOCK_SYSTEM_SHARE_PACKAGE = "com.android.intentresolver";
+export const MOCK_FOREIGN_PACKAGE = "com.example.player";
 type Blocker = Extract<
   AppFailureCode,
   "login_required" | "challenge_required" | "rate_limited" | "emulator_rejected"
@@ -297,7 +321,8 @@ export interface MockChatOptions {
   popup?: boolean;
   // A dialog no contract declares.
   undeclaredDialog?: "launch" | "after_send";
-  blocker?: { code: Blocker; when: "launch" | "after_send" };
+  // "source_page": the blocker shows once a source's page (`sourcePages`) has opened.
+  blocker?: { code: Blocker; when: "launch" | "after_send" | "source_page" };
   // "launch": the App never comes to the foreground. "after_send": it leaves it.
   crash?: "launch" | "after_send";
   // Cold start: the launcher stays in front for this many looks at the screen.
@@ -387,6 +412,27 @@ export interface MockChatOptions {
   // The back key on a step's source list leaves the tool-step screen as well.
   toolListExitsToChat?: boolean;
   missing?: "new_conversation" | "send" | "sources_close";
+  // A title of the source panel opens the source's page, shaped like the real one (Doubao
+  // 15.7.0, task 11-24 research): close and share controls in a top bar, no address bar, the
+  // web content in a container, and a share sheet whose "copy link" puts the source's `link`
+  // on the clipboard. The back key closes the sheet, and from the page leads straight back to
+  // the panel as it was left.
+  sourcePages?: boolean;
+  // The share sheet slides in for this long: its views move, and a tap on "copy link" meanwhile
+  // lands nowhere.
+  shareSlideMs?: number;
+  // After "copy link", Android's clipboard preview hides the source rows and the share sheet's
+  // items for this long.
+  linkOverlayMs?: number;
+  // The back key does not leave a source's page.
+  pageStuck?: boolean;
+  // With `linkOverlayMs`: the preview hides only this many rows at the end of the visible part
+  // of the list, instead of all of them (it sits in the lower part of the screen).
+  linkOverlayRows?: number;
+  // After "copy link", Android's clipboard preview swallows every swipe on the source list for
+  // this long: the list does not move (real device, Doubao 15.7.0; design of task 11-24, §13).
+  // Independent of `linkOverlayMs`, which hides rows.
+  linkSwipeSwallowMs?: number;
 }
 
 export const MOCK_PACKAGE = "com.larus.nova";
@@ -406,7 +452,20 @@ export class MockChatApp implements MockModel {
   readonly sent: string[] = [];
   running = false;
   private foregrounded = false;
-  private view: "chat" | "sidebar" | "sources" | "tools" = "chat";
+  // "chooser": Android's own share sheet over a source's page; "foreign": another App a source
+  // opened.
+  private view: "chat" | "sidebar" | "sources" | "tools" | "page" | "chooser" | "foreign" = "chat";
+  // The source that opened another App, while that App is in front.
+  private foreignSource: MockSource | null = null;
+  // The source whose page is open, and since when its share sheet shows.
+  private page: { source: MockSource; sheetAt: number | null } | null = null;
+  // Taps on a title that opened nothing so far, and taps on "copy link" that did nothing, by
+  // source.
+  private readonly deadTapsUsed = new Map<MockSource, number>();
+  private readonly copyMissesUsed = new Map<MockSource, number>();
+  private linkCopiedAt: number | null = null;
+  // Every page that was opened, by the source's title.
+  readonly pagesOpened: string[] = [];
   // The list a tool step opened, while it is open.
   private toolSources: MockSource[] | null = null;
   private toolBacks = 0;
@@ -434,8 +493,120 @@ export class MockChatApp implements MockModel {
       this.options.now().getTime() - this.conversation.at >= (this.options.generationMs ?? 20_000)
     );
   }
-  private applies(when: "launch" | "after_send" | undefined): boolean {
-    return when === "launch" || (when === "after_send" && this.conversation !== null);
+  private applies(when: "launch" | "after_send" | "source_page" | undefined): boolean {
+    return (
+      when === "launch" ||
+      (when === "after_send" && this.conversation !== null) ||
+      (when === "source_page" && this.view === "page")
+    );
+  }
+  private elapsedSince(at: number | null): number {
+    return at === null ? Number.POSITIVE_INFINITY : this.options.now().getTime() - at;
+  }
+  // Android's clipboard preview after "copy link".
+  private get linkOverlay(): boolean {
+    return this.elapsedSince(this.linkCopiedAt) < (this.options.linkOverlayMs ?? 0);
+  }
+  private openPage(source: MockSource): void {
+    const used = this.deadTapsUsed.get(source) ?? 0;
+    if (used < (source.deadTaps ?? 0)) {
+      this.deadTapsUsed.set(source, used + 1);
+      return;
+    }
+    if (source.opensApp) {
+      this.foreignSource = source;
+      this.view = "foreign";
+      return;
+    }
+    this.pagesOpened.push(source.title);
+    this.page = { source, sheetAt: null };
+    this.view = "page";
+  }
+  // Android's own share sheet over a source's page: a preview of the link, its copy button and
+  // the Apps to share with.
+  private chooserNodes(): MockNode[] {
+    const { source } = this.page!;
+    const copy = () => {
+      if (source.link === undefined) return;
+      this.copied = source.link;
+      this.linkCopiedAt = this.options.now().getTime();
+      if (source.systemShare === "dismisses") this.view = "page";
+    };
+    return [
+      { id: "android:id/content_preview_text", className: TEXT_VIEW, text: source.link ?? "" },
+      { id: `${MOCK_SYSTEM_SHARE_PACKAGE}:id/copy`, desc: "复制", onTap: copy },
+      { className: TEXT_VIEW, text: "合成应用" },
+    ];
+  }
+  // A source's page: top bar, web content, and the share sheet when it was opened.
+  private pageNodes(): MockNode[] {
+    const { source, sheetAt } = this.page!;
+    const sliding = this.elapsedSince(sheetAt) < (this.options.shareSlideMs ?? 0);
+    const copy = () => {
+      if (sliding) return;
+      const missed = this.copyMissesUsed.get(source) ?? 0;
+      if (missed < (source.copyMisses ?? 0)) {
+        this.copyMissesUsed.set(source, missed + 1);
+        return;
+      }
+      this.page!.sheetAt = null;
+      if (source.copyOpensChooser) {
+        this.view = "chooser";
+        return;
+      }
+      if (source.link === undefined) return;
+      this.copied = source.link;
+      this.linkCopiedAt = this.options.now().getTime();
+    };
+    const item = (text: string, onTap?: () => void): MockNode[] => [
+      { id: id("img_app_icon"), className: "android.widget.ImageView" },
+      // The text view does not say that it takes a tap; a tap on it lands on its item.
+      { id: id("tv_app_name"), className: TEXT_VIEW, text, onTap, clickable: false },
+    ];
+    return [
+      { id: id("btn_back"), desc: "关闭", onTap: () => this.leavePage() },
+      { id: id("tv_title"), className: TEXT_VIEW, text: source.title },
+      ...(source.noShare
+        ? []
+        : [
+            {
+              id: id("btn_share"),
+              desc: "分享",
+              onTap: () => {
+                if (source.systemShare) this.view = "chooser";
+                else this.page!.sheetAt = this.options.now().getTime();
+              },
+            },
+          ]),
+      { id: id("bullet_container") },
+      ...(sheetAt === null
+        ? []
+        : [
+            // While the sheet slides in, its views are somewhere else on every look.
+            ...(sliding
+              ? [
+                  {
+                    id: id("share_sheet_offset"),
+                    height:
+                      1 + Math.ceil((this.options.shareSlideMs! - this.elapsedSince(sheetAt)) / 10),
+                  },
+                ]
+              : []),
+            ...(this.linkOverlay
+              ? []
+              : [...item("复制链接", copy), ...item("反馈与举报"), ...item("更多")]),
+          ]),
+    ];
+  }
+  // The rows of the list the clipboard preview leaves visible, where it hides only the last ones.
+  private underLinkOverlay(rows: MockNode[]): MockNode[] {
+    const hidden = this.linkOverlay ? (this.options.linkOverlayRows ?? 0) : 0;
+    return rows.slice(0, Math.max(0, rows.length - hidden));
+  }
+  private leavePage(): void {
+    if (this.options.pageStuck) return;
+    this.page = null;
+    this.view = "sources";
   }
   // The sent text as the App shows it.
   private shownQuestion(): string {
@@ -648,6 +819,13 @@ export class MockChatApp implements MockModel {
         ],
       };
     const app = (nodes: MockNode[]): MockScreen => ({ foreground: MOCK_PACKAGE, nodes });
+    if (this.view === "chooser")
+      return { foreground: MOCK_SYSTEM_SHARE_PACKAGE, nodes: this.chooserNodes() };
+    if (this.view === "foreign")
+      return {
+        foreground: MOCK_FOREIGN_PACKAGE,
+        nodes: [{ id: "com.example.player:id/video", className: TEXT_VIEW, text: "合成视频" }],
+      };
     if (this.applies(this.options.undeclaredDialog))
       return app([{ id: id("mock_unknown_dialog"), className: TEXT_VIEW, text: "合成未知弹窗" }]);
     if (this.applies(this.options.blocker?.when))
@@ -711,6 +889,8 @@ export class MockChatApp implements MockModel {
         }),
       ]);
 
+    if (this.view === "page") return app(this.pageNodes());
+
     if (this.view === "sources" && this.equalCards) {
       const sources = this.openList().map(
         (source): MockNode => ({
@@ -736,7 +916,12 @@ export class MockChatApp implements MockModel {
           ...(cards ? { onTap: () => undefined } : {}),
           children: [
             { id: id("tv_reference_index"), className: TEXT_VIEW, text: String(index + 1) },
-            { id: id("tv_reference_content"), className: TEXT_VIEW, text: source.title },
+            {
+              id: id("tv_reference_content"),
+              className: TEXT_VIEW,
+              text: source.title,
+              ...(this.options.sourcePages ? { onTap: () => this.openPage(source) } : {}),
+            },
             ...(source.site
               ? [{ id: id("mock_reference_site"), className: TEXT_VIEW, text: source.site }]
               : []),
@@ -776,8 +961,15 @@ export class MockChatApp implements MockModel {
               },
             ]
           : []),
-        ...this.cutCard(sources),
-        ...this.window(sources, this.sourcesTop, this.options.sourcesViewport ?? 50),
+        // The clipboard preview after "copy link" hides the rows of the list.
+        ...(this.linkOverlay && this.options.linkOverlayRows === undefined
+          ? []
+          : [
+              ...this.cutCard(sources),
+              ...this.underLinkOverlay(
+                this.window(sources, this.sourcesTop, this.options.sourcesViewport ?? 50),
+              ),
+            ]),
       ]);
     }
 
@@ -842,6 +1034,8 @@ export class MockChatApp implements MockModel {
     if (!this.running) {
       this.view = "chat";
       this.toolSources = null;
+      this.page = null;
+      this.foreignSource = null;
       this.mode = "voice";
       this.startingReads = this.options.slowStartReads ?? 0;
       this.startupDialogs = this.options.startupAnr ?? 0;
@@ -855,7 +1049,17 @@ export class MockChatApp implements MockModel {
   back(): void {
     this.settlePanel();
     if (this.view === "chat") this.foregrounded = false;
-    else if (this.view === "sources") {
+    else if (this.view === "chooser") this.view = "page";
+    else if (this.view === "foreign") {
+      if (this.foreignSource?.opensApp === "returns") {
+        this.foreignSource = null;
+        this.view = "sources";
+      }
+    } else if (this.view === "page") {
+      // The share sheet first, then the page.
+      if (this.page!.sheetAt !== null) this.page!.sheetAt = null;
+      else this.leavePage();
+    } else if (this.view === "sources") {
       // A press while the panel is on its way out changes nothing.
       if (this.panelClosingAt !== null) return;
       this.panelBacks += 1;
@@ -884,6 +1088,11 @@ export class MockChatApp implements MockModel {
         ? Math.min(Math.max(0, length - size), top + step)
         : Math.max(0, top - step);
     };
+    if (
+      this.view === "sources" &&
+      this.elapsedSince(this.linkCopiedAt) < (this.options.linkSwipeSwallowMs ?? 0)
+    )
+      return;
     if (this.view === "sources")
       this.sourcesTop = move(
         this.sourcesTop,

@@ -58,6 +58,45 @@ export type VideoEvidence = z.infer<typeof videoEvidenceSchema>;
 // operator gives the list's path in the contract, repeated on every source read from it.
 export const sourceListLabelSchema = z.string().regex(/^[a-z][a-z0-9_]{0,19}$/u);
 
+// Why the link of a source was not got, where the contract has every source opened to read it
+// (contract `links`). Fixed words, never text from a screen.
+//   page_not_opened      a tap on the title, and a second one, opened no page
+//   share_missing        the page shows no share control
+//   copy_missing         the share sheet shows no "copy link"
+//   clipboard_unchanged  the clipboard still held the previous source's link after two copies
+//   not_a_link           what the copy gave is not a web address
+//   page_not_closed      the page, or the panel behind it, did not come back; no source after it
+//                        was opened
+//   not_attempted        not opened: the page before it did not close, or a stop was requested
+//   not_reached          not opened: the panel stopped moving before its row came on screen
+//   time_budget          not opened: the time allowed for the answer's links was up
+//   row_not_found        its row was on screen but could not be found again to tap it
+//   share_external       the share control opened a sheet of another package (Android's own)
+//                        that the contract does not declare, or whose copy gave nothing
+//   left_app             the source opened another App, which the back key left again
+export const linkIssueSchema = z.enum([
+  "page_not_opened",
+  "share_missing",
+  "copy_missing",
+  "clipboard_unchanged",
+  "not_a_link",
+  "page_not_closed",
+  "not_attempted",
+  "not_reached",
+  "time_budget",
+  "row_not_found",
+  "share_external",
+  "left_app",
+]);
+export type LinkIssue = z.infer<typeof linkIssueSchema>;
+// How the link of a source was read: the text the copy gave, as it is, and whether `url` is the
+// source's address restored from it (links.ts) or that text itself; or why there is none.
+export const citationLinkSchema = z.union([
+  z.object({ copied: z.string().min(1), restored: z.boolean() }).strict(),
+  z.object({ issue: linkIssueSchema }).strict(),
+]);
+export type CitationLink = z.infer<typeof citationLinkSchema>;
+
 // Only what the App shows. `site` and `url` are null when the screen does not expose them;
 // they are never guessed or completed.
 export const citationSchema = z
@@ -68,8 +107,19 @@ export const citationSchema = z
     // Which of the answer's source lists this source was read from. Only where the contract
     // declares several lists; a source that two lists show is then kept once per list.
     list: sourceListLabelSchema.optional(),
+    // Only where the contract has every source opened to read its link. Absent otherwise, so a
+    // record of a contract without `links` is what it always was.
+    link: citationLinkSchema.optional(),
   })
-  .strict();
+  .strict()
+  // A copied link is the source's `url`: restored from it, or the text itself.
+  .refine(
+    (source) =>
+      source.link === undefined ||
+      !("copied" in source.link) ||
+      (source.url !== null && (source.link.restored || source.url === source.link.copied)),
+    { path: ["url"], message: "must be the copied link or what was restored from it" },
+  );
 const visibleStateSchema = z.enum(["on", "off", "unknown"]);
 export const searchStateSchema = z
   .object({
@@ -198,6 +248,17 @@ export const appRecordSchema = z
     video: videoEvidenceSchema.nullable(),
     screenshot: fileEvidenceSchema.nullable(),
     uiDump: fileEvidenceSchema.nullable(),
+    // Only where reading the links of the sources ended because the list stopped moving: the
+    // screen and hierarchy at that moment (`links-stop.png`, `links-stop.xml`), for finding out
+    // why its last sources were not reached (design of task 11-24, §12.2). A part that could not
+    // be taken is null. Local evidence only; never part of a result submission.
+    linkStop: z
+      .object({
+        screenshot: fileEvidenceSchema.nullable(),
+        hierarchy: fileEvidenceSchema.nullable(),
+      })
+      .strict()
+      .optional(),
     // Why the evidence is unusable: always present on `evidence_incomplete`, optional on a
     // failure whose recording also had a problem, never on a valid sample.
     evidenceIssue: evidenceIssueSchema.optional(),

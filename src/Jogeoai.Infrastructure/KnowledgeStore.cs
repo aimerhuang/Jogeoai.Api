@@ -17,6 +17,11 @@ public sealed class KnowledgeStore(MySqlDatabase database, IObjectStorage object
     private const long QuotaBytes = 1L * 1024 * 1024 * 1024;
     private const int MaxTitleLength = 500;
     private const int MaxFolderNameLength = 200;
+    /// <summary>摄取任务最多被领取执行的次数；达到后失败重试与租约过期重领都不再继续。</summary>
+    public const int MaxIngestAttempts = 3;
+    /// <summary>租约多次过期后在领取时放弃任务所写入的错误码。</summary>
+    public const string IngestInterruptedCode = "KNOWLEDGE_INGEST_INTERRUPTED";
+    private const string IngestInterruptedMessage = "资料处理多次中断，请重新上传。";
     private static readonly HashSet<string> SupportedExtensions =
         [".pdf", ".docx", ".md", ".markdown", ".txt", ".jpg", ".jpeg", ".png"];
 
@@ -581,7 +586,7 @@ public sealed class KnowledgeStore(MySqlDatabase database, IObjectStorage object
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
         await using var command = new MySqlCommand("""
             SELECT BIN_TO_UUID(j.id), BIN_TO_UUID(j.tenant_id), BIN_TO_UUID(j.document_id), BIN_TO_UUID(j.version_id),
-                   v.object_key, v.original_file_name, v.extension, j.attempt_count
+                   v.object_key, v.original_file_name, v.extension, j.attempt_count, j.status
             FROM knowledge_ingest_jobs j
             JOIN knowledge_document_versions v ON v.tenant_id=j.tenant_id AND v.id=j.version_id
             JOIN knowledge_documents d ON d.tenant_id=j.tenant_id AND d.id=j.document_id
@@ -594,13 +599,41 @@ public sealed class KnowledgeStore(MySqlDatabase database, IObjectStorage object
         // The reader must be closed before any further command (including
         // rollback) runs on this connection.
         KnowledgeIngestJobLease? job = null;
+        var status = string.Empty;
         await using (var reader = await command.ExecuteReaderAsync(cancellationToken))
         {
             if (await reader.ReadAsync(cancellationToken))
+            {
                 job = new KnowledgeIngestJobLease(Guid.Parse(reader.GetString(0)), Guid.Parse(reader.GetString(1)), Guid.Parse(reader.GetString(2)),
                     Guid.Parse(reader.GetString(3)), reader.GetString(4), reader.GetString(5), reader.GetString(6), reader.GetInt32(7), workerId);
+                status = reader.GetString(8);
+            }
         }
         if (job is null) { await transaction.RollbackAsync(CancellationToken.None); return null; }
+        // 此处的 AttemptCount 是库里的值（本次领取尚未加一），即已经开始过的执行次数。
+        if (status == "running" && job.AttemptCount >= MaxIngestAttempts)
+        {
+            // running 且被选中说明租约已过期：上一次执行中断（Worker 崩溃）或超出了租约，结果没能写回。
+            // 次数用尽后在同一事务内记为失败并让出队列，否则它永远是最早的可领任务，会挡住所有租户。
+            // 与 FailIngestJobAsync 的失败分支写同一组状态；这里没有有效租约，所以不带租约条件。
+            // 版本已是 ready 时不改：发布事务按语句判断租约，租约恰好在「版本写成 ready」与「任务写成 done」之间过期时
+            // 会留下 ready 版本 + running 任务；没有租约条件的这条语句不能把已发布（可能正是当前）的版本改成失败。
+            await ExecuteAsync(connection, transaction, """
+                UPDATE knowledge_document_versions SET status='failed', error_code=@code, error_message=@message,
+                  completed_at=UTC_TIMESTAMP(6)
+                WHERE tenant_id=UUID_TO_BIN(@tenant) AND id=UUID_TO_BIN(@version) AND status <> 'ready';
+                UPDATE knowledge_ingest_jobs SET status='failed', error_code=@code, error_message=@message,
+                  lease_owner=NULL, lease_until=NULL, completed_at=UTC_TIMESTAMP(6), updated_at=UTC_TIMESTAMP(6)
+                WHERE tenant_id=UUID_TO_BIN(@tenant) AND id=UUID_TO_BIN(@job);
+                UPDATE knowledge_documents SET status=CASE WHEN current_version_id IS NOT NULL THEN 'ready' ELSE 'failed' END,
+                  updated_at=UTC_TIMESTAMP(6)
+                WHERE tenant_id=UUID_TO_BIN(@tenant) AND id=UUID_TO_BIN(@document) AND status <> 'disabled';
+                """, cancellationToken, ("@code", IngestInterruptedCode), ("@message", IngestInterruptedMessage),
+                ("@tenant", job.TenantId.ToString()), ("@version", job.VersionId.ToString()),
+                ("@job", job.JobId.ToString()), ("@document", job.DocumentId.ToString()));
+            await transaction.CommitAsync(cancellationToken);
+            return null;
+        }
         await ExecuteAsync(connection, transaction, """
             UPDATE knowledge_ingest_jobs SET status='running', lease_owner=@owner, lease_until=DATE_ADD(UTC_TIMESTAMP(6), INTERVAL @seconds SECOND),
               attempt_count=attempt_count+1, started_at=COALESCE(started_at,UTC_TIMESTAMP(6)), updated_at=UTC_TIMESTAMP(6)
@@ -713,7 +746,8 @@ public sealed class KnowledgeStore(MySqlDatabase database, IObjectStorage object
         await using var connection = database.CreateConnection(); await connection.OpenAsync(cancellationToken);
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
         await EnsureLeaseAsync(connection, transaction, job, cancellationToken);
-        var status = retryable && job.AttemptCount < 3 ? "pending" : "failed";
+        // 租约里的 AttemptCount 已包含本次领取；第 MaxIngestAttempts 次执行失败后不再排队重试。
+        var status = retryable && job.AttemptCount < MaxIngestAttempts ? "pending" : "failed";
         await ExecuteAsync(connection, transaction, """
             UPDATE knowledge_document_versions SET status=@version_status, error_code=@code, error_message=@message,
               completed_at=CASE WHEN @version_status='failed' THEN UTC_TIMESTAMP(6) ELSE NULL END

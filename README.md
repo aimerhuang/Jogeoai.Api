@@ -4,7 +4,7 @@ AI 可见性服务的 .NET 后端。本文是当前实现与本机开发的入�
 
 采集上层的需求见 [Elmo 级管理与分析接口 PRD](.trellis/tasks/09-26-elmo-collection-upper-api/prd.md)。品牌管理、多样本采集、提及证据、Overview/Visibility/Share of Voice、Fan-Out 与引用细分已实现；Opportunities 属第二期。
 
-最新只读服务快照见 [本机状态核对](docx/local-state-verification.md)（2026-11-12；保留 10-11 / 10-19 历史记录）。各模块带日期的部署与实测段落只说明当次证据，不代表服务一直运行或其他环境已部署；健康检查、后台消费和完整验收分别判断。
+最新服务快照见 [本机状态核对](docx/local-state-verification.md)（2026-11-27 安全修复的本机验证；保留 11-12 / 10-11 / 10-19 历史记录）。各模块带日期的部署与实测段落只说明当次证据，不代表服务一直运行或其他环境已部署；健康检查、后台消费和完整验收分别判断。
 
 ## 部署与仓库结构（2026-11-20）
 
@@ -12,6 +12,126 @@ AI 可见性服务的 .NET 后端。本文是当前实现与本机开发的入�
 - **采集端**：`collector/` 是采集端（Node.js，原 Ai-visiblility-collector）的源码快照。安卓 App 采集节点在每台采集电脑上原生运行，不放进服务器的 Docker；“加一台采集电脑”的步骤见 [部署说明](docx/deployment.md) 第 3 节。
 - **公开仓库**：GitHub 上的仓库由 `scripts/export-public-repo.sh` 从本机两个目录导出，不包含 `.env`、数据库备份、本机数据、`.trellis` 开发记录（含安全审计）、第三方参考代码。下文中指向 `.trellis/` 的链接在公开仓库里不可用。
 - **上线前**：当前代码不宜直接开放公网，必须先完成 [部署说明](docx/deployment.md) 第 4 节列出的事项。
+
+## 代理与来源校验（2026-11-27，源码与进程内测试；真实网关未验证）
+
+本节目前只有受信转发头。来源校验（CSRF）和生产启动断言还没有实现。
+
+API 经反向代理访问时，TCP 对端是代理地址。只有配置了受信代理，API 才会采用 `X-Forwarded-For` 与 `X-Forwarded-Proto`。配置节 `ForwardedHeaders`（实现在 `src/Jogeoai.Api/Security/ForwardedHeadersSetup.cs`）：
+
+| 键 | 说明 |
+| --- | --- |
+| `ForwardedHeaders:KnownProxies` | 受信代理的 IP 列表。环境变量写法：`ForwardedHeaders__KnownProxies__0`、`__1` … |
+| `ForwardedHeaders:KnownNetworks` | 受信代理所在的网段列表，CIDR 写法，例如 `172.30.250.0/24` |
+| `ForwardedHeaders:ForwardLimit` | 最多采用 `X-Forwarded-For` 中的几项（从右往左数），1–5，缺省为 1 |
+
+- **两个列表都为空（默认，本机开发即如此）**：不注册转发头中间件，请求里的 `X-Forwarded-*` 一律不采用，客户端 IP 就是 TCP 对端地址。空白项按没填处理。
+- **任一列表有值**：只信任配置中写明的地址，框架默认信任的 loopback 会被清掉。从 `X-Forwarded-For` 最右边一项开始往左取；当前这一跳受信才取下一项，遇到不受信的地址或取满 `ForwardLimit` 项就停。不处理 `X-Forwarded-Host`。没有对端地址的连接（例如让 Kestrel 监听 Unix 套接字）不算受信代理，它带来的转发头不采用。
+- **启动失败**：某一项不是合法的 IP / CIDR、列表键被写成了单个值、`ForwardLimit` 不是 1–5 的整数。错误信息只包含配置键名，不包含配置值。
+- 中间件位于管道第一位。`Program.cs` 的两处注册限流、品牌识别的匿名分区、兑换失败频控、`auth_sessions.created_ip` 和 `LoginRejected` 日志都读 `Connection.RemoteIpAddress`，没有改代码，读到的是处理后的地址。
+- 启动日志会输出一行 `ForwardedHeaders enabled: knownProxies=… knownNetworks=… forwardLimit=…` 或 `ForwardedHeaders disabled: …`，只有数量，没有地址。
+- 部署时由 `deploy/compose.yml` 把 `JOGEOAI_SUBNET`、`FRONTEND_PROXY_IP`、`FORWARDED_LIMIT` 传给 api 容器；对网关的要求见 [部署说明](docx/deployment.md) 2.4 节。Worker 没有 HTTP 入口，不需要这些配置。
+
+注意：
+
+- 受信网段里的任何地址发来的 `X-Forwarded-For` 都会被采用，所以紧邻 API 的网关必须在每个请求上自己写这个头，不能把客户端带来的值原样透传。
+- 不要设置框架自带的 `ASPNETCORE_FORWARDEDHEADERS_ENABLED=true`：它会另外注册一个信任所有来源的转发头中间件。应用目前不会在启动时拦截这个开关。
+- `KnownNetworks` 不接受前缀长度为 0 的网段（`0.0.0.0/0`、`::/0`）：那等于信任所有来源，应用会拒绝启动。
+- 验证范围：`ForwardedHeadersSetupTests`（进程内 Kestrel，含两跳、伪造、限流分区、compose 网段对端、无对端地址；compose 网段对端和无对端地址是用测试专用中间件模拟的）。`appsettings*.json` 里没有这个配置节，所以默认不启用；本机 5260 已于 2026-11-27 22:07 用新构建重启（Development，本机没有配置受信代理），启动日志显示受信转发头未启用，健康检查为 200。配置了受信代理的情形没有在运行态验证过；真实的宿主机网关、前端服务器和 Docker 端口映射后的对端地址都还没有实测。
+
+## 采集接口的鉴权前开销限制（2026-11-27，源码与进程内测试；本机 5260 已重启并核对鉴权顺序与 413，限流与真实网关未验证）
+
+Trellis `11-27-sec-collector-preauth-cost`。`/internal/collector/*` 上，匿名请求能消耗的内存、CPU 和数据库查询现在有上限。合法且令牌正确的请求行为不变；没有数据库迁移。
+
+- **请求体上限**：12 个 POST 接口都有 `[RequestSizeLimit]`，常量在 `src/Jogeoai.Api/Security/CollectorRequestLimits.cs`。超限返回 413（没有响应体），不反序列化。
+
+  | 接口 | 上限 |
+  | --- | --- |
+  | App：`leases`、`sent`、`heartbeats`、`failures`；网页：`leases`、`heartbeats`、`eligibility`、`failures`、`session-events` | 16 KiB |
+  | App：`bindings/report` | 1 MiB |
+  | App：`results` | 4 MiB |
+  | 网页：`results` | 6 MiB |
+
+- **先鉴权后读请求体**：App 节点令牌（`AppNodeAuthenticationFilter`）和网页共享令牌（`CollectorServiceTokenFilter`）在模型绑定之前校验。令牌缺失、错误、节点被停用或未执行 049 时，直接返回与原来相同的 401 / 403 / 503 响应体，应用不读取也不解析请求体。因此“令牌错误”的请求不论请求体如何都是 401：此前损坏的 JSON 会先得到 400，网页通道区域不是 `cn` 会先得到 403、`tenantId` 不合法会先得到 400。请求体里的 `nodeId`、区域和租户名单仍在动作内检查，顺序不变。`GET /internal/collector/health` 仍然匿名。
+- **不查用户会话**：`/internal` 与 `/mcp`（及其子路径，不区分大小写）的请求不再查询 `auth_sessions`。需要用户会话的 Controller 不能放在这两个前缀下。
+- **按客户端 IP 限流（只在客户端地址已知时生效）**：策略 `collector-internal` 覆盖两个采集控制器的全部接口（含 health），固定窗口 1 分钟，不排队，超出返回 429 `RATE_LIMITED` 和 `Retry-After`。限流发生在鉴权和读请求体之前，被拒请求不查库。
+
+  | 键 | 说明 |
+  | --- | --- |
+  | `Collector:RateLimit:PermitPerMinute` | 每个客户端 IP 每分钟允许的请求数，缺省 600（环境变量 `Collector__RateLimit__PermitPerMinute`）。不是不小于 1 的整数时 API 拒绝启动，错误信息只包含配置键名 |
+
+  - **没有配置受信转发头时，采集接口没有任何应用内限流。** 请求体上限和先鉴权后读请求体照常生效。本机开发默认就是这种状态。启动时会记录一行 `Collector rate limit inactive: …`（Development 为 Information，其他环境为 Warning），不含配置值。
+  - 配置了受信转发头后，客户端 IP 取处理后的 `Connection.RemoteIpAddress`。下面两种情况同样不限流：连接没有对端地址；处理后的地址仍然是受信代理自己（在 `KnownProxies` 里或落在 `KnownNetworks` 内，IPv4 与它的 IPv4 映射 IPv6 写法视为同一个地址），也就是网关没有写 `X-Forwarded-For`。
+  - 原因（2026-11-27 评审后修订）：限流先于鉴权，不带令牌的请求也计数。如果按代理地址限流，所有采集电脑共用一个桶，任何能访问 App 采集路径的人每秒发约 10 个请求就能让全部采集电脑收到 429 并各自退避 10 分钟。所以客户端地址未知时宁可不限流。
+  - 客户端不能靠伪造转发头退出限流：网关覆盖或追加 `X-Forwarded-For` 时，API 采用的是网关写的对端地址（有测试）。只有网关原样透传客户端的头时客户端才能选择地址，那种配置下限流本来就能被绕过，[部署说明](docx/deployment.md) 2.4 节禁止这样配置。
+  - 从受信代理主机自己发出的请求（前端服务器、能直连 API 端口的本机进程、compose 网络里的其他容器）不受限流。
+- 所有限流策略（注册、验证码、品牌识别、候选问题、MCP、采集）共用的 429 响应现在都带 `Retry-After`，状态码和响应体没有变。
+- 现行采集端把任何 4xx 都当作“被拒绝”并退避 10 分钟，413 和 429 也一样；采集端区分它们的改动不在本仓库。
+- 验证范围：`CollectorRequestLimitTests`、`CollectorPreBindingAuthTests`、`SessionMiddlewareBypassTests`、`CollectorRateLimitTests`（进程内 Kestrel 监听 127.0.0.1:0，Store 都是桩，不连数据库；限流测试里的网关对端地址是用测试专用中间件模拟的）。本机 5260 已于 2026-11-27 22:07 用新构建重启（Development），启动日志有一行 Information 级别的 `Collector rate limit inactive`。在 5260 上用 HTTP 核对过：`/internal/collector/app/leases` 不带令牌时，合法 JSON、损坏的 JSON 和 1.1 MB 的请求体都返回 401（改动前损坏的 JSON 会先得到 400）；错误令牌加损坏的 JSON 返回 401；`/internal/collector/leases` 不带令牌返回 401；`GET /internal/collector/health` 返回 200；`/mcp` 不带令牌返回 401；带本机配置的网页采集令牌时，损坏的 JSON 返回 400（鉴权通过，绑定失败），向 16 KiB 上限的接口发送 1.1 MB 请求体返回 413。没有在运行态验证的：用真实节点令牌走 App 接口的 413；429 限流（本机按设计不生效）；真实采集端收到 413 / 429 后的表现；真实网关。网关层限流仍建议配置，没有验证过。
+
+## 知识库摄取重领上限与文件解析预算（2026-11-27，SQL 测试已在本机隔离库通过，本机 Worker 已重启；真实 PDF 未核对）
+
+Trellis `11-07-sec-pdf-budget`。知识库摄取是所有租户共用的单循环 Worker。此前一个处理时间超过租约的文件会被无限重领，挡住所有租户的摄取，只能人工改库；PDF 解析也没有页数、像素、时间上限。本次没有数据库迁移，没有接口变化，新错误码出现在已有的错误字段里。详细说明见 [品牌知识库说明](docx/brand-knowledge.md#摄取重领上限与文件解析预算2026-11-27本机已部署)。
+
+- **重领上限**：摄取任务（`knowledge_ingest_jobs`）和产品识别任务（`knowledge_product_parse_jobs`）在领取时检查次数。租约已过期且已经执行过 3 次的任务不再执行，在领取事务内记为失败：摄取写 `KNOWLEDGE_INGEST_INTERRUPTED`「资料处理多次中断，请重新上传。」，任务、版本、资料三处状态与普通失败一致（已经发布为 `ready` 的版本不会被改成失败）；产品识别写 `PRODUCT_PARSE_INTERRUPTED`「识别多次中断，请重新发起。」，产品变为识别失败，可以重新发起。
+- **摄取租约**：由 2 分钟改为 `Knowledge:Ingest:LeaseSeconds`，默认 300 秒，允许 30–3600；不合法时 Worker 启动失败。摄取没有心跳，Worker 崩溃后的任务要等租约到期（默认 5 分钟，此前 2 分钟）才会被重领。
+- **解析预算**（配置节 `Knowledge:Extraction`，API 与 Worker 共用注册，都有默认值；超出允许范围时启动失败）：
+
+  | 键 | 默认 | 允许范围 | 超限时 |
+  |---|---|---|---|
+  | `MaxPdfPages` | 1000 | 1–100000 | `KNOWLEDGE_PDF_TOO_MANY_PAGES`，不解析任何页 |
+  | `MaxCharacters` | 10000000 | 1–100000000 | `KNOWLEDGE_CONTENT_TOO_LARGE`；PDF 逐页累计，超过即停止 |
+  | `MaxImagePixels` | 40000000 | 1–1000000000 | 只约束需要解码的内嵌图片：按声明宽 × 高在解码前判断，超过的不解码、跳过，结果标记为截断。原始字节就是 JPEG、不解码直接送出的图片不受此项约束，仍只受单张 10 MB 的字节上限约束 |
+  | `ParseTimeoutSeconds` | 90 | 1–3600 | `KNOWLEDGE_PARSE_TIMEOUT`「文件解析超时，请拆分后重新上传。」 |
+
+  新错误码都不重试。产品识别读取来源文件时，这些错误沿用原有映射，显示为 `PRODUCT_PARSE_SOURCE_UNREADABLE` 加上面的中文提示。
+- **行为变化**：
+  - 被中断 3 次的任务（例如 Worker 连续重启时正在处理的文件）现在会失败，需要用户重试或重新上传；此前会一直重领。本机 `knowledge_ingest_jobs` 现有 6 行全部 `done`，`attempt_count` 最大为 4，即至少有一个任务被领取过 4 次。如果多出来的领取来自租约过期，新规则下它会在第 4 次领取时失败；如果来自失败后的人工重试（重试不清零次数，按待处理任务重新排队，不受上限限制），则不受影响。只读查询无法区分这两种来源。
+  - 人工重试后的任务只有一次执行机会：次数没有清零，这一次再被中断就会在下次领取时失败。
+  - 声明像素超过上限、取页图时需要解码的 PDF 内嵌图片被跳过（此前会解码）；页图全部被跳过、又没有文本层的扫描件会得到 `KNOWLEDGE_EMPTY_CONTENT`。原样送出的 JPEG 页图行为不变（例如 600 dpi 的 A3 扫描约 7000 万像素，只要不超过 10 MB 就照常送出）。
+- **仍然存在的风险**：
+  - 超时是进程内的，不能强制中止。PDF 库卡在单个页面内部时，Worker 只是放弃等待并把任务记为失败，那个线程继续占用一个 CPU 核心和该文件的内存，直到 Worker 进程重启；多个这样的文件会叠加。本次没有改为独立进程解析。
+  - 没有内存预算。100 MiB 的输入上限不变，页内解压占用的内存没有上限；`deploy/compose.yml` 没有容器内存上限。Worker 被系统杀掉后会自动重启，重领上限保证同一个文件最多被执行 3 次。
+  - 解析在超时内完成、但分块和向量化超过剩余租约的大文件，现在会在 3 次执行后失败。此前是无限循环，同样不会成功。
+  - `ParseTimeoutSeconds` 不小于摄取租约时，慢文件来不及在租约内记为超时，只能靠重领上限在 3 次后失败；Worker 启动时会记一条警告。
+- **验证范围**：`KnowledgeAdapterTests` 与 `BasicDocumentTextExtractorImageTests`（样本 PDF 由测试代码生成；超页数、逐页超字符并提前停止、需要解码的超像素图片跳过、超像素的原始 JPEG 照常送出且仍受字节上限约束、超时、调用方取消、启动校验、默认上限下的 PDF / DOCX）41 项通过，连续 3 次结果相同。六个安全子任务涉及的 33 个不连库测试类合并运行 3 次，每次 845 项通过、0 失败；这次合并运行发现调用方取消时被放弃的 PDF 解析没有被取消，`KnowledgeAdapters.cs` 已改为显式取消，上述结果是修复之后的。重领上限的 4 个 SQL 用例已在本机隔离测试库（已执行 001–052）运行：`KnowledgeStoreSqlTests` 与 `KnowledgeProductStoreSqlTests` 共 6 项通过、0 失败，其中包含这 4 个新用例。本机没有 PDF 资料（6 个版本是 5 个 `.md` 和 1 个 `.png`，没有 `page_count`），默认上限没有用真实样本核对过。没有构造真实的恶意 PDF，没有实测内存。本机 API 与 Worker 已于 2026-11-27 22:07 用新构建重启；Worker 重启后运行一分多钟日志没有错误，摄取和产品识别循环按新的领取语句轮询。重领上限和解析上限没有在运行态触发过。
+
+## 品牌研究额度与公平领取（2026-11-27，SQL 测试已在本机隔离库通过，本机 API / Worker 已重启；409 / 429 未在运行态验证，前端改动未做）
+
+Trellis `11-07-sec-task-storage-quota` 的 R10（R11 内容图片额度本轮未实施，该任务保持未完成）。此前任何可写成员都能无限次发起品牌研究：每个任务由所有租户共用的单个 Worker 处理，使用平台的 Provider 凭据做联网模型调用，队列又是全局先进先出，一个租户既能抬高费用，也能挡住其他租户的任务。本次没有数据库迁移。
+
+- **入队额度**（`POST /api/v1/sites/{siteId}/brand-research`，在站点行锁内、与插入同一事务，顺序如下）：
+  1. 相同 `refreshKey` 且内容相同的重放：返回原任务（202），不计入次数，也不会被下面两项拦截；内容不同仍是 409 `RESEARCH_IDEMPOTENCY_CONFLICT`。
+  2. 该品牌已有 `pending` / `running` 任务：409 `RESEARCH_ALREADY_ACTIVE`「该品牌已有研究任务在进行中。」，响应体 `error.details.jobId` 是现有任务的 ID。带 `reuseJobId` 的请求同样会新建任务，受同一限制（这项检查先于 `reuseJobId` 是否存在的 404）。任务完成、失败或被取消后名额释放。
+  3. 当前团队最近 24 小时内已新建 20 个任务：429 `RESEARCH_DAILY_LIMIT`「今天的品牌研究次数已用完，请明天再试。」，没有 `details`，也没有 `Retry-After`。
+- **两点细化**：
+  - “每日”按**滚动 24 小时**计算（`created_at` 晚于当前时间减 24 小时），不是自然日，没有零点重置。已取消和失败的任务同样计入，因为它们可能已经消耗了 Provider 调用。
+  - 同一团队**不同品牌**的并发请求各持各的站点行锁，极端情况下团队计数会略微超过上限（最多超出“并发品牌数 − 1”次）。没有为此加团队级锁：别处的加锁顺序是先团队后站点，这里反过来加会引入死锁风险。
+  - 同一品牌的并发请求只会成功一条：请求在站点行锁上排队，入队事务使用 READ COMMITTED（`ResearchStore.EnqueueIsolation`），取得锁之后读到的是前一个请求已提交的任务。两项额度读取都不加锁，不会与 Worker 的领取或租约更新互相等待。对应的并发 SQL 用例已在本机隔离库通过：READ COMMITTED 下同一品牌的并发请求只插入一条任务。
+- **配置**（节 `Research:Quota`，只有 API 读取；配置节缺失时用默认值，任一数值小于 1 时 API 启动失败）：
+
+  | 键 | 默认 | 含义 |
+  |---|---|---|
+  | `MaxActivePerSite` | 1 | 每个品牌同时允许的 `pending` / `running` 任务数 |
+  | `DailyPerTenant` | 20 | 每个团队滚动 24 小时内可新建的任务数 |
+
+- **Worker 领取顺序**：由全局先进先出改为“最近最少被服务的团队优先”。每个可领取任务的排序值是它所属团队最近一次被服务的时间（该团队任务 `started_at` 的最大值），升序；从未被服务过的团队没有这个时间，用任务自己的创建时间代替。排序值相同时按任务创建时间，同一团队内仍按创建顺序。
+  - 新团队不插队：新团队的任务排在“上次服务早于这个任务创建时间”的团队之后，等这些团队各被服务一次就轮到它。最初的写法是“从未被服务过的团队排最前”，评审时发现每注册一个新团队就能插队一次、持续注册可以让已有团队一直排不到，已在同日改为现在的规则。
+  - 领取语句只锁定候选任务行（`FOR UPDATE OF j SKIP LOCKED`），读取团队最近服务时间的子查询不加锁。
+  - `started_at` 只在任务第一次被领取时写入，失败后重试或租约过期后的再次领取不会刷新团队的“最近服务时间”。
+- **前端配套改动（2026-11-27 已在 `Jogeoai.web` 完成；接管 409 已在 3001 预览对本机 5260 实测，429 未在运行态触发）**：`src/views/Prompts/create/useRecommendation.ts`，前端类型已从本机 5260 重新生成。
+  - 发起新任务前先等上一个任务的取消请求返回（成功或失败都继续），避免“换一批”“重试”与取消赛跑而得到 409 `RESEARCH_ALREADY_ACTIVE`。
+  - 收到 409 `RESEARCH_ALREADY_ACTIVE` 且带 `error.details.jobId` 时接管该任务：继续轮询并展示进度（提示「继续该品牌未完成的推荐任务」），弹窗的「取消」会取消这个任务；完成后的候选会去掉已展示和已排除的问题。不带 `details.jobId` 的 409 仍按失败展示。这也解决了页面刷新、请求中止或轮询超时后遗留任务让品牌一直 409 的问题：下一次推荐会接管它。服务端没有“查询某品牌当前进行中任务”的接口，409 里的 `details.jobId` 仍是唯一途径。
+  - 429 `RESEARCH_DAILY_LIMIT` 直接展示服务端文案，不再附加「可重试」。每次“换一批”仍会新建任务并计入 20 次。
+  - OpenAPI 的变化：该接口新增 409 和 429 响应说明（错误外壳 `MonitoringAnswerErrorResponse`，`details` 没有进入 schema，按 `ApiError.details` 读取）。
+- **仍然存在的风险**：
+  - 领取语句对每个候选任务执行一次“该团队最近服务时间”的子查询，现有索引只能按 `tenant_id` 前缀定位，需要回表读取 `started_at`。候选任务数受每品牌 1 个的限制，队列为空时不执行子查询；单个团队历史任务很多时开销会变大。2026-11-27 在本机开发库（79 个任务、2 个团队）对修订后的领取语句执行了 `EXPLAIN`：外层表使用 `ix_brand_research_jobs_claim`（range，约 2 行，filesort），依赖子查询按 `tenant_id` 前缀做 `ref` 查找（每个团队约 20 行）。按当前数据量不需要补 `(tenant_id, started_at)` 索引（补索引需要迁移）。
+  - 公平性按团队计算，没有等待上限的情况已经排除：一个任务前面只可能排着“排序值比它早”的团队，这些团队每被服务一次排序值就变成当时的时间，新入队的新团队排序值是入队时间，都不会再排到它前面。剩下的是下面几个有上限的偏差：
+    - 重试不占用轮次。`started_at` 只在首次领取时写入，一个任务最多 3 次尝试，后两次领取时团队的排序值没有后移。任务反复出现可重试失败的团队，每一轮最多能占用 3 次处理。
+    - 新团队会被“回来的老团队”各超过一次。上次服务早于新团队任务创建时间的团队，即使在新团队之后才入队，也排在它前面；每个这样的团队只能超过一次。新团队多等的次数不超过这段时间内入队的这类团队数。
+    - 注册多个团队可以多占份额。N 个团队在轮转里占 N 份，每个团队仍受每 24 小时 20 次的限制；这不会让别人排不到，但会拉长每一轮。本任务没有按用户或按 IP 的研究额度。
+  - 两个研究 Worker 同时领取时，公平顺序只是近似的。
+- **验证范围**：`dotnet build Jogeoai.slnx` 0 错误；`BrandResearchQuotaTests`（额度默认值与启动校验、API / Worker 两种注册方式下 `ResearchStore` 可解析、两个新错误在 Controller 的映射与 `details.jobId`、只读成员先得到 403 且 Store 零调用、Swagger 中的 409 / 429 说明）及受影响的既有无库测试类通过，命令和数量见 `.trellis/tasks/11-07-sec-task-storage-quota/verification.md`。入队检查与领取顺序的 7 个 SQL 用例（`BrandResearchQuotaSqlTests`，需要 `JOGEOAI_KNOWLEDGE_TEST_CONNECTION` 指向已迁移的独立测试库）已在本机隔离测试库运行并全部通过（同一品牌并发在 READ COMMITTED 下只插入一条任务、滚动 24 小时上限、领取顺序、新团队不插队）。`BrandResearchQuotaSqlTests` 与 `BrandResearchStoreTests` 合计 8 项通过、1 项跳过；跳过的是既有用例 `BrandResearchStoreTests.PersistsContext…`，它需要带有既有租户数据的专用库 `jogeoai_registration_20260929`，这个用例调整后的断言仍未运行。本机 5260 API 和 Worker 已于 2026-11-27 22:07 用新构建重启，健康检查为 200；Worker 重启后运行一分多钟日志没有错误，研究循环按新的领取语句轮询。409 `RESEARCH_ALREADY_ACTIVE` 已于 2026-11-27 22:57 在运行态触发：优联品牌发起推荐后刷新页面，再次推荐得到 409（`details.jobId` 为遗留任务），弹窗接管轮询并通过「取消」取消该任务（204，状态 `cancelled`），两次 409 都没有新增任务行。429 `RESEARCH_DAILY_LIMIT` 没有在运行态触发过。
 
 ## App 渠道采集（2026-11-17，本机已执行 049 并重启 API / Worker；默认不对任何租户开放）
 
@@ -50,6 +170,49 @@ Trellis `11-16-app-channel-monitoring-api`，是跨仓库总 PRD 的子任务 A�
 - `Collector:AppTenantIds` 默认为空，所以 App 不对任何租户开放。提问检查规则（DC-01）还没有经用户确认。
 
 配置项、运营操作、三级回滚和完整的未验证项见 [App 渠道说明](docx/app-channel.md)，命令与证据见 [verification.md](.trellis/tasks/11-16-app-channel-monitoring-api/verification.md)，规范见 [.trellis/spec/backend/app-channel.md](.trellis/spec/backend/app-channel.md)。
+
+## App 节点绑定审批与限速（2026-11-27，本机 `jogeoai` 已执行 052 并重启 API / Worker；管理端新接口与真实采集节点未验证）
+
+Trellis `11-27-sec-app-node-binding-approval`（公网上线前安全修复的子任务 F，审计 P2 / P2b）。App 采集路径在网关上不限来源 IP，节点令牌一旦泄露可以从任何地方使用。这次改动把一个令牌能造成的影响限制在“运营批准过的那几台设备”之内。
+
+**做了什么**
+
+- **新绑定要先批准**：采集节点新上报的绑定一律登记为 `stopped` / `disabled_by_operator`，并标记为未批准。上报什么健康状态都不能让它生效。系统管理员调用现有的恢复接口 `POST /api/v1/admin/collector-app/bindings/{bindingId}/resume` 就是批准，批准后才能领取任务。已批准的绑定再被停用、恢复，批准时间不变。
+- **每个节点有设备上限**：一个节点可登记的不同设备（AVD）数默认最多 4 台。超出的绑定在上报响应的 `rejected` 里返回，错误码 `device_limit_exceeded`，不入库。上限用新接口 `PUT /api/v1/admin/collector-app/nodes/{nodeId}/max-devices`（请求体 `{"maxDevices": n}`，1–64）调整，不能调到低于该节点已登记的设备数（409 `APP_NODE_MAX_DEVICES_BELOW_REGISTERED`）。
+- **未批准的绑定不影响别人**：它不能领取任务；它的失败上报不写审计事件，不改绑定、任务和平台；平台的验证熔断和“全部绑定都被 App 拒绝”的判断只统计已批准的绑定。
+- **心跳有总时长上限**：一次租约从领取起最多续到 1800 秒（`AppChannel:MaxLeaseTotalSeconds`，900–86400，只有 API 读取），也不会超过任务的截止时点。超过后心跳返回 409 `STALE_LEASE`，租约按现有的截止时间自然到期。
+- **运营可见**：绑定列表增加 `approvalPending`、`approvedAt`，节点列表增加 `maxDevices`；告警视图和每日汇报增加“待批准的绑定”一类（`pendingApprovalBindings`），这些绑定不再出现在“停止的绑定”里。
+
+**采集端不需要升级**：没有新增停止原因的取值，待批准用现有的 `disabled_by_operator` 表示；绑定上报、领取、心跳、失败上报的响应结构都没有变。按设计，采集端看到的是一条“被运营停用”的绑定，会跳过它并照常定时上报；这一点依据采集端源码的阅读结论，没有用真实节点验证。
+
+**迁移与部署**
+
+- 依赖迁移 [052](db/migrations/052_app_binding_approval.sql)，回滚脚本见 [rollback/052](db/migrations/rollback/052_app_binding_approval_rollback.sql)。
+- 052 只加两列和一个 CHECK：`collector_app_bindings.approved_at`、`collector_app_nodes.max_devices`（1–64，默认 4）。已有绑定全部回填为已批准，状态不变；已有节点的上限取 4 与已登记设备数中较大的一个。某个节点已登记超过 64 台设备时，052 拒绝执行，不做任何修改。
+- 部署顺序：**先在目标库执行 052，再同时发布 API 与 Worker。** 未执行时，新版本的绑定上报、领取、发题回执、失败上报和运营的节点 / 绑定接口（列表、停用、恢复、设备上限）在写入之前返回 503 `APP_CHANNEL_SCHEMA_NOT_MIGRATED`，不产生任何修改；节点登记和令牌轮换仍然可用；告警和每日汇报照常生成，只是没有“待批准”一类。
+- 发布之后，每新增一台模拟器或一个平台绑定，都要在后台批准一次；超过 4 台设备的电脑要先调高节点的设备上限。
+- 在执行 052 和发布新版本之间，由旧版本登记的绑定没有批准记录：新版本上线后它们不能领取任务（领取请求不写入任何内容，判断“平台还有没有可用绑定”时也不算它们），下一次上报时变为待批准，需要批准一次。
+- 回滚：先回退 API / Worker，再按需执行 `rollback/052`。回退代码后新绑定恢复为立即生效。回滚后再次执行 052 时，当时库里的全部绑定（包括回滚前待批准的）都会被回填为已批准，重新执行前先处理这些绑定。
+
+**现状**
+
+- 源码和测试已完成，`dotnet build Jogeoai.slnx` 0 错误。不连数据库的定向测试通过；命令与数量见 [verification.md](.trellis/tasks/11-27-sec-app-node-binding-approval/verification.md)。
+- **052 已在本机执行**：六个隔离测试库（root，随 001–052 一起执行）和本机开发库 `jogeoai`（2026-11-27，用应用账号，不是 root；执行前备份 `.backups/jogeoai-db-pre-052-20261127-220615.sql.gz`）。其他库没有执行（目前还没有生产库）。
+- 本机 `jogeoai` 执行 052 前的只读核对：1 个节点（active）、2 台不同设备、12 条绑定，全部 active。执行后：两列和 CHECK 都存在；这个节点 `max_devices = 4`；12 条绑定仍是 `active`，全部已批准（`approved_at = created_at`），待批准 0 条；没有残留的存储过程。
+- **SQL 用例已在隔离库运行**（绑定审批、设备上限及其并发、未批准绑定的隔离、心跳上限、告警分类、052 的回填 / 重放 / 回滚）：全部 `App*` 测试类加 `CollectorSessionPoolSqlTests` 共 457 项，首次运行 456 通过、1 失败。失败的是 `AppChannelMigrationTests.NewTablesCarryTheAgreedDefaultsAndConstraints` 里一处原有的、依赖执行顺序的断言：它期望绑定间隔是 049 的默认值 300 秒，而迁移 050 把它改成 100 秒，表上是哪个值取决于回滚重放用例是否先运行。断言改为两个值都接受，并在测试库重新执行 050 之后，完整运行 457 通过、0 失败、0 跳过。052 的迁移用例（回填、重放、回滚）用应用账号通过。
+- 本机 5260 API 和 Worker 已于 2026-11-27 22:07 用新构建重启，健康检查为 200。在 5260 上用 HTTP 核对过：`/internal/collector/app/leases` 不带令牌返回 401；`GET /api/v1/sites/{siteId}/app-collection/status` 经 Development 的 `X-Tenant-Id` 兼容桥返回 200；管理端 `collector-app` 接口没有会话返回 401。
+- 本机已用临时系统管理员会话验证（2026-11-27）：节点列表 `maxDevices = 4`；12 条绑定全部 `active`、`approvalPending = false`、`approvedAt` 有值；告警含 `pendingApprovalBindings`（0 条）；`max-devices` 的越界返回 400、低于已登记设备数返回 409、无会话返回 401。
+- 没有在运行态验证的：`max-devices` 的成功写入、非管理员会话的 403；真实采集节点遇到待批准绑定和 `device_limit_exceeded` 时的表现，也就是“采集端不需要升级”。
+- 前端类型没有重新生成（新接口和新字段见 [App 渠道说明](docx/app-channel.md) 4.1、4.2、4.6 节）。
+
+**仍然存在的风险**
+
+- 持有令牌的人仍然可以用**已批准的设备**领取任务、提交伪造的回答，或者在领取后上报 `challenge_required` 等失败让任务终止。这是采集端固有的信任边界；影响范围现在受设备数和每台设备 100 秒的发送间隔限制，不能再靠虚报设备放大。
+- 待批准的绑定仍然占用“平台 + 账号代号”的唯一键，可以抢先占用账号代号。数量受“设备上限 × 平台数”限制，运营能在告警里看到。
+- 设备冷却仍然从节点自报的发送时间算起。
+- 已批准但被运营停用的绑定，它的失败上报仍然计入验证熔断（原有行为，这次没有改）。
+
+详见 [App 渠道说明](docx/app-channel.md) 第 0 节与 4.2 节、[部署说明](docx/deployment.md) 3.1 节，规范见 [.trellis/spec/backend/app-channel.md](.trellis/spec/backend/app-channel.md)。
 
 ## 新增提问 / 新增模型后的立即采集（2026-11-12，源码与本机接口已核对，端到端待验收）
 
@@ -271,6 +434,7 @@ Trellis `10-30-article-editor-backend`（父任务 `10-30-article-studio-two-ste
   - 须先迁移，再同时发布 API 与 Worker。未执行时 App 相关入口返回 503 `APP_CHANNEL_SCHEMA_NOT_MIGRATED`，现有功能不受影响。
   - 回滚见 `db/migrations/rollback/049_app_channel_rollback.sql`。存在 App 回答、App 站点目标、启用的 App 计划或 App 任务时，脚本拒绝执行。
   - 见上文「App 渠道采集」和 [App 渠道说明](docx/app-channel.md)。
+- `052_app_binding_approval.sql`（2026-11-27 本机 `jogeoai` 已用应用账号执行，执行前备份 `.backups/jogeoai-db-pre-052-20261127-220615.sql.gz`，API / Worker 已重启为新构建；另在六个本机隔离测试库执行；其他库未执行）依赖 049，给 `collector_app_bindings` 增加可空列 `approved_at`（已有绑定回填为登记时间，即全部视为已批准），给 `collector_app_nodes` 增加 `max_devices`（默认 4，CHECK 1–64；已有节点回填为 4 与已登记设备数中较大的一个）。不新增停止原因的取值。可重放：两条回填只在最后一步的 CHECK 还不存在时执行，重放不会把待批准的绑定批准掉。某个节点已登记超过 64 台设备时拒绝执行。可以用应用账号执行，不需要 root（2026-11-27 在本机 `jogeoai` 实测），执行须加 `--default-character-set=utf8mb4`。须先迁移，再同时发布 API 与 Worker；未执行时用到这两列的 App 入口返回 503 `APP_CHANNEL_SCHEMA_NOT_MIGRATED`。回滚见 `db/migrations/rollback/052_app_binding_approval_rollback.sql`（先回退 API / Worker）。见上文「App 节点绑定审批与限速」。
 - `008_auth_brand_onboarding.sql` 新增邮箱密码用户、可撤销会话、租户成员、品牌引导进度、全局研究 Provider 配置和异步品牌研究任务，并为站点增加报告标题与子域名开关。`009_system_admin_provider_access.sql` 再增加默认关闭的系统管理员标记，`010_research_provider_plaintext_credential.sql` 将 Provider 凭据切换为明文列并写入默认 OpenAI 配置；三份 migration 均需手动执行，只有数据库显式授权的系统管理员可以修改全局 Provider。
 
 ## 品牌概览首位 / 前三提及率（2026-11-02）
@@ -409,7 +573,7 @@ Trellis 任务 `11-09-content-domain-detail-ownership`，无 migration：
 
 前端进入已登录工作空间时，`POST /api/v1/sites/{siteId}/prompt-monitoring` 幂等建立当前已启用问题的首轮采集和品牌时区每日 09:01 主计划（047 起由 09:00 改为 09:01）；品牌有「2次/天」的监控单元格时，另有品牌时区 00:05 的凌晨计划，只采这些单元格（见上文「品牌监控模型配置：回答模式 × 采集频率」）。已有计划的 POST/GET 会对账未来选择并返回当前/最近运行，不另建首轮或补跑；暂停的计划不会被登录自动启用。首轮键绑定问题版本、品牌分析配置与采集选择；跨实例 MySQL 命名锁防止重复建立计划。首次开启时，跟随团队默认配置且没有启用的可监控目标的品牌写入团队默认配置（048 起，见上文「团队默认监控配置」）；团队从未保存过默认配置时仍按原规则：首次无目标时从目录选择 ChatGPT 的支持地区（当前 US）并保留提问语言，不能直接将品牌的 CN 地区作为 ChatGPT 采集地区。已有目标保持原配置。
 
-2026-10-08 的 Gemini 增量复用这些表，新增 [021 加法迁移](db/migrations/021_gemini_result_quality.sql) 保存回答/来源质量及目标启用时间。Gemini 须由品牌显式启用，进入未来自动轮次，不加入启用前遗漏时隙；自定义计划和已冻结轮次不自动扩展。Check、监控列表和回答详情新增 `resultQuality`，区分明确空来源、未暴露、异常、安全过滤与截断，历史质量保持未知。021 已经用户授权部署至本机 `jogeoai`；优联科技 5 个原问题的 Gemini 单样本真实采集 **5/5 成功，保存 47 条引用**，数据库、Check、监控列表及同快照详情回查一致。实测暴露并修复了列表按长正文分组导致的 MySQL 排序内存错误，追加 87 项定向测试及单节点编译通过。原 169 项代码验证与本次真实验收分别记录；6 项隔离 SQL 套件仍未执行，不能据此声称所有数据库场景通过。手动采集现役入口不扣项目积分，Cloro 真实用量新增 5；自动监控仍为 10 积分/问题/目标/采样。已知 Run 汇总分析字段仍为旧常量，应以监控列表/详情判断本批实际分析完成状态。合同、结果全文及证据入口见 [Gemini 回答记录说明](docx/gemini-answer-recording.md)。
+2026-10-08 的 Gemini 增量复用这些表，新增 [021 加法迁移](db/migrations/021_gemini_result_quality.sql) 保存回答/来源质量及目标启用时间。Gemini 须由品牌显式启用，进入未来自动轮次，不加入启用前遗漏时隙；自定义计划和已冻结轮次不自动扩展。Check、监控列表和回答详情新增 `resultQuality`，区分明确空来源、未暴露、异常、安全过滤与截断，历史质量保持未知。021 已经用户授权部署至本机 `jogeoai`；优联科技 5 个原问题的 Gemini 单样本真实采集 **5/5 成功，保存 47 条引用**，数据库、Check、监控列表及同快照详情回查一致。实测暴露并修复了列表按长正文分组导致的 MySQL 排序内存错误，追加 87 项定向测试及单节点编译通过。原 169 项代码验证与本次真实验收分别记录；6 项隔离 SQL 套件仍未执行，不能据此声称所有数据库场景通过。手动采集当时的入口不扣项目积分（2026-11-27 起代码改为与自动监控同价预占，见下文「手动采集与采集计划计费」），Cloro 真实用量新增 5；自动监控仍为 10 积分/问题/目标/采样。已知 Run 汇总分析字段仍为旧常量，应以监控列表/详情判断本批实际分析完成状态。合同、结果全文及证据入口见 [Gemini 回答记录说明](docx/gemini-answer-recording.md)。
 
 Copilot 沿用 Gemini 的按品牌显式启用策略，复用 Cloro、未来每日轮次和结果质量能力，新品牌默认仍仅 ChatGPT。2026-10-09 补齐 Copilot 专项样例与监控回归，并修复手动创建 Run 缺少 viewer 写限制的入口；242 项定向测试通过，零失败/零跳过。2026-10-10 在本机 `jogeoai` 完成 Copilot 手动实测（5/5 成功），并修复了每日计划时隙的命名锁事务缺陷。2026-10-11 已只读确认首个含 Copilot 的每日轮次：ChatGPT/Gemini/Copilot 各 5/5 成功，15 条分析完成，结算 150 项目积分；证据见 [本机状态核对](docx/local-state-verification.md)。前端可在「采集任务」页启用/停用模型，隔离 SQL 仍未执行。配置入口、积分估算及质量语义统一见 [Copilot 接入说明](docx/copilot-answer-recording.md)。
 
@@ -656,7 +820,7 @@ WHERE id = UUID_TO_BIN('<registered-user-id>') AND status = 'active';
 
 引导第三/四步自 2026-11-11 起使用 `POST /api/v1/sites/{siteId}/prompt-suggestions/quick` 与 `POST /api/v1/sites/{siteId}/competitor-suggestions` 同步推荐，不抓取官网、不创建研究任务。问题候选默认约 8 条行业词 + 2 条品牌词，引导选择 1–5 条；竞品域名由模型给出、未经联网核验。接口只推荐、不落库、不扣积分，真实模型与完整新用户流程的验收边界见 [注册引导说明](docx/registration-onboarding.md)。
 
-「新增监测问题」弹窗的 AI 推荐仍使用 `POST /api/v1/sites/{siteId}/brand-research` 创建异步任务、GET 查询、POST `/{jobId}/cancel` 取消。`industry-v2` 策略依次收集官网资料、提取有证据的业务画像、生成候选并独立审核；资料不足返回 `RESEARCH_NEEDS_INPUT`。弹窗使用 `singleRound=true` 返回本轮已通过部分，可通过 `reuseJobId` 复用画像换批。详细参数、写法规则、抓取与租约边界统一见注册引导说明中的「异步品牌研究」，不与同步引导混用。
+「新增监测问题」弹窗的 AI 推荐仍使用 `POST /api/v1/sites/{siteId}/brand-research` 创建异步任务、GET 查询、POST `/{jobId}/cancel` 取消。`industry-v2` 策略依次收集官网资料、提取有证据的业务画像、生成候选并独立审核；资料不足返回 `RESEARCH_NEEDS_INPUT`。弹窗使用 `singleRound=true` 返回本轮已通过部分，可通过 `reuseJobId` 复用画像换批。2026-11-27 起（本机 5260 已于当日用该构建重启，其他环境未部署）发起接口有额度：每个品牌同时只能有一个进行中的任务（409 `RESEARCH_ALREADY_ACTIVE`，`error.details.jobId` 为现有任务），每个团队滚动 24 小时内最多 20 次（429 `RESEARCH_DAILY_LIMIT`），见上文「品牌研究额度与公平领取」。详细参数、写法规则、抓取与租约边界统一见注册引导说明中的「异步品牌研究」，不与同步引导混用。
 
 本机可在另一个终端运行 `./scripts/run-local.sh research`，只启动品牌研究 Worker；`./scripts/run-local.sh worker` 保持启动全部后台任务。2026-11-11 起引导第三/四步改用同步快速推荐，不依赖研究 Worker；研究任务仍供「新增监测问题」弹窗的 AI 推荐使用。定向验证与实际模型调用记录见 [注册引导说明](docx/registration-onboarding.md)。
 
@@ -676,6 +840,17 @@ Development 下可用 `X-Tenant-Id` 调用 `POST/GET/PATCH /api/v1/sites` 及站
 **登录防护（2026-11-08，安全修复 C2）**：只统计登录失败、不限制 IP 访问次数；同一账号（规范化邮箱，含不存在的邮箱）连续失败 30 次后锁定 1→2→4→8→15 分钟（上限 15 分钟，可经 `Auth:LoginThrottle` 配置），锁定期内直接返回 429 `RATE_LIMITED` 与 `Retry-After`，不校验密码；成功登录复位。不存在或停用账号同样执行一次等成本假散列，不按计时区分账号是否存在。计数跨实例共享（迁移 045）。身份接口响应带 `Cache-Control: no-store`；浏览器默认只写 HttpOnly Cookie，响应体不再含 `sessionToken`，非浏览器客户端需带请求头 `X-Jogeoai-Session-Delivery: token` 才在响应体取得令牌（此时不写 Cookie），其他取值返回 400 `INVALID_SESSION_DELIVERY`。本机 5260 已于 2026-11-08 10:00 用该构建重启（终端标签 c1），证据见 `.trellis/tasks/archive/2026-11/11-07-sec-login-hardening/verification.md`。
 
 可重复的隔离库 API 验证脚本在 [tests/stage1_api_smoke.py](tests/stage1_api_smoke.py)。运行前应让 API 指向已执行 001–005 的独立测试库，并准备测试租户与测试用 Cloro 设置；脚本创建测试记录，不运行 Worker，不调用真实 Cloro，也不清理测试库。设置 `STAGE1_ALLOW_SETTINGS_MUTATION=1` 时，脚本还会暂时停用测试库的 Cloro 设置以验证幂等重放，然后恢复为启用状态。
+
+**手动采集与采集计划计费（2026-11-27，安全修复 D，Trellis `11-27-sec-manual-run-charging`）**：代码与不连库的定向测试已完成，无迁移；SQL 测试已在本机隔离库运行：`ManualRunChargingSqlTests`、`CollectionScheduleSqlTests`、`InstantCollectionSqlTests`、`AnswerModeSqlTests` 合计 22 项通过（首次运行 19 项通过、1 项跳过，跳过的用例随后接上提问范围测试库运行，所在测试类 3/3 通过），`PromptImportSqlTests` 9 项通过；`GeminiAnswerPersistenceSqlTests` 没有运行（它只接受 33318 端口的专用实例，本机没有）。本机 5260 API 与 Worker 已于 2026-11-27 22:07 用该构建重启，健康检查为 200，`prompt-monitoring`、`collection-schedules`、`visibility-runs`、`targets` 的只读接口经 Development 兼容桥返回 200；手动采集和自建计划时隙的积分预占与结算没有运行态验证。凡是会产生真实 Provider 调用的采集都先预占积分，是否计费不看计划名称，也不看客户端提交的字段。
+- `POST /api/v1/visibility-runs` 的 `previewId` / `targetIds` / `tagIds` 形态与 `targets` 形态按每日监控同价预占（检测数 × 10），余额不足返回 402 `CREDIT_INSUFFICIENT` 且不创建运行，同一 `Idempotency-Key` 重放不重复预占；系统管理员发起的也扣所在租户的积分。
+- 所有采集计划的时隙运行都预占积分（原先只有每日监控主计划和凌晨计划计费）；余额不足时该时隙 `skipped`（`CREDIT_INSUFFICIENT`），计划保持启用。
+- 计划名称与数量：每日监控主计划、凌晨计划不能改名（409 `SCHEDULE_NAME_LOCKED`）；自建计划不能创建为或改名为它们的保留名称，含仅大小写、全角或重音不同的写法（409 `SCHEDULE_NAME_RESERVED`；App 采集计划名称仍是 400 `INVALID_SCHEDULE_NAME`）；每个站点的自建计划数量上限由 `Collection:Schedules:MaxCustomPerSite` 决定，默认 20，超出返回 409 `SCHEDULE_LIMIT_REACHED`。保留名称先在应用层近似判断，写入后再由 MySQL 按 `name` 列自身的排序规则比较一次，以后者为准（MySQL 按 `utf8mb4_0900_ai_ci` 比较的用例已在隔离库运行并通过）。
+- 已知限制：数量上限不是严格上限，创建时对站点行持有的是共享锁，同一站点的并发创建可能同时通过检查而超过上限；采集计划没有删除接口，达到上限后只能修改并复用已有计划。
+- 已知限制：预占可能长期不结算。对应 Provider 的 Worker 没有运行或被关闭（`Doubao:Worker:Enabled=false` 等）时任务停在 `pending`，任务租约反复过期时这条路径没有次数上限，两种情形下预占一直是 `held`、积分不回到可用余额，目前没有自动释放。它们在每日监控中原本就存在，手动采集计费后用户发起的手动采集也会遇到（创建运行时只检查 Provider 是否已配置，不检查 Worker 是否在运行）。
+- `visibility_runs.requested_by` 由服务端写入（`user:{userId:N}`；Development 的 `X-Tenant-Id` 兼容桥为 `dev-bridge`）。请求体的 `requestedBy` 保留但不再存储，只参与 HTTP 请求摘要。没有 `http_request_hash` 的早期运行用原幂等键重放会返回 409 `RUN_IDEMPOTENCY_CONFLICT`，这是已接受的兼容性损失。
+- `platforms` 形态（国内网页采集通道）不计费：非 Development 环境只允许系统管理员发起（否则 403 `ADMIN_REQUIRED`，在重放查询和运行存储调用之前判定），每次最多 200 个 Prompt、20 个平台入口（超出 400 `INVALID_RUN`）；Development 下行为不变。
+- 采集预览 `CollectionPreviewView.estimatedAmount` 返回「预期检测数 × 10」，不再恒为空。
+- 上线影响：已有的自建计划从发布后的下一个时隙开始计费，发布前须在目标库盘点。本机开发库 `jogeoai` 于 2026-11-27 只读核对没有自建计划（3 个租户的 5 个主计划、1 个停用的凌晨计划、1 个 App 采集计划），其他运行库尚未核对。API 与 Worker 须一起发布。前端 `Jogeoai.web` 的类型尚未按新契约重新生成。细节、已知限制与回滚见 [品牌监控配置说明](docx/brand-monitoring-config.md) §4、§9。
 
 `POST /api/v1/visibility-runs` 的 Cloro 请求使用 `targets`：每个 target 包含 `provider=cloro`、六个已注册引擎之一、可选 `locale`/`country` 和空 `options` 对象；国内 Collector 的 `platforms` 请求仍保持兼容且不能与 `targets` 混用。运行历史使用 `GET /api/v1/sites/{siteId}/visibility-runs`，接受 `status`、`provider`、`from`、`to`、`cursor` 和 `limit`，返回 `{items,nextCursor}`；不存在或跨租户的站点返回 404。详情使用 `GET /api/v1/visibility-runs/{runId}`、`GET /api/v1/visibility-runs/{runId}/checks` 和 `GET /api/v1/visibility-checks/{checkId}`，Development 下必须携带 `X-Tenant-Id`。新国内 Check 同样冻结 Prompt 版本、标签、品牌词分类与主体配置版本；旧行的 `snapshotMissing=true` 表示回填信息不完整。Cloro Check 固定为 `captureMode=scraped`、`evidenceClass=observed_surface`；原始响应只保存受控脱敏内容或哈希引用。
 

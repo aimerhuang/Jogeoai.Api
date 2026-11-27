@@ -86,4 +86,43 @@ internal static class AppChannelSchema
         DeviceDispatchMigrated.TryAdd(key, true);
         return true;
     }
+
+    private static readonly ConcurrentDictionary<string, bool> BindingApprovalMigrated = new(StringComparer.Ordinal);
+
+    /// <summary>
+    /// 绑定审批与节点设备上限（迁移 052）用到的读写前调用：绑定上报、领取、发题回执、失败上报、绑定停用与恢复、运营的节点与绑定视图、设备上限的设置。
+    /// 未执行 052 时返回 503，不做任何写入。
+    /// </summary>
+    internal static async Task RequireBindingApprovalAsync(MySqlConnection c, MySqlTransaction? t, CancellationToken ct)
+    {
+        if (!await HasBindingApprovalAsync(c, t, ct))
+            throw new CollectorStoreException(NotMigratedCode, "App 绑定审批所需的迁移 052 尚未部署。", 503);
+    }
+
+    /// <summary>
+    /// 052 是否已在当前库完成：两列都在，并且最后一步的 CHECK 也在。CHECK 是 052 的完成标记，它出现之前回填可能还没有做完，
+    /// 这时把 approved_at 为空当作“待批准”会把全部现有绑定都算成待批准，所以只加了列的库仍按未迁移处理。
+    /// 肯定的结果按「数据源 / 库名」缓存，否定的结果每次重新探测。
+    /// </summary>
+    internal static async Task<bool> HasBindingApprovalAsync(MySqlConnection c, MySqlTransaction? t, CancellationToken ct)
+    {
+        var key = $"{c.DataSource}/{c.Database}";
+        if (BindingApprovalMigrated.ContainsKey(key)) return true;
+        if (!await ProbeBindingApprovalAsync(c, t, ct)) return false;
+        BindingApprovalMigrated.TryAdd(key, true);
+        return true;
+    }
+
+    /// <summary>不经缓存直接探测 052 的两列和 CHECK 是否齐全。</summary>
+    internal static async Task<bool> ProbeBindingApprovalAsync(MySqlConnection c, MySqlTransaction? t, CancellationToken ct)
+    {
+        await using var query = new MySqlCommand("""
+            SELECT (SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = DATABASE()
+                      AND ((table_name = 'collector_app_bindings' AND column_name = 'approved_at')
+                        OR (table_name = 'collector_app_nodes' AND column_name = 'max_devices')))
+                 + (SELECT COUNT(*) FROM information_schema.check_constraints WHERE constraint_schema = DATABASE()
+                      AND constraint_name = 'ck_collector_app_nodes_max_devices');
+            """, c, t);
+        return Convert.ToInt32(await query.ExecuteScalarAsync(ct)) == 3;
+    }
 }

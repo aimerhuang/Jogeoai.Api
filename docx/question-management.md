@@ -11,6 +11,7 @@
 - 新建启用提问、导入 / 批量创建中的实际新提问会尝试立即采集；修改已有启用提问的平台范围时只补新增模型，只减少模型不触发。不看该模型当天是否按频率到期；没有监控计划时先尝试建立计划和首轮，已暂停则不采集。
 - 写接口响应可带 `instantCollection`：`started`（已建运行，不代表回答已完成）、`already_collected`、`skipped`，以及 `runId`、`checkCount`、`estimatedCredits`、`reasonCode`、`message`、`shortfall`。批量结果新增 `createdPromptIds`。余额不足、服务不可用等采集失败不回滚提问保存。
 - 每条检测 10 积分，按提问 × 有效模型单元格 × 采样数计算；已有当天排队、运行中或成功的监控检测参与去重。主时隙展开会剔除当天已立即采集的对应项，全被剔除时跳过码为 `MONITORING_ALREADY_COLLECTED`；凌晨时隙不做这项剔除。
+- App 渠道（2026-11-27 源码，`11-27-app-first-cycle-now`）：立即采集本身仍不含 App 目标；提问写入（新建、导入、批量创建、编辑 / 启停）后另外同步 App 计划，当前周期还没排过的「提问 × App 平台」立即进入一个即时时隙，由 Worker 建任务，不等下一周。见 [App 渠道说明](app-channel.md) 第 0 节。
 - 不新增迁移；发布时 API 与 Worker 同版本（或先 Worker 后 API），避免旧 Worker 在主时隙重复采集。方案记录的主时隙展开与立即采集并发竞态仍待解决，见 [设计 §9](../.trellis/tasks/11-11-prompt-list-models-instant-collect/design.md)。
 - **已核对**：后端实现及 5260 公开字段存在。**pending**：本轮未运行定向单测 / 隔离 SQL、未验证真实创建到回答可见、积分、幂等重放及下个真实主时隙去重；未核对相邻前端的模型弹层和类型生成。不得把任务清单或 OpenAPI 存在当作这些验收已通过。
 

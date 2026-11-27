@@ -348,7 +348,7 @@ public sealed class PromptImportSqlTests
     {
         var prompt = Guid.Parse((await RowsAsync(cs, "SELECT BIN_TO_UUID(id) FROM prompts WHERE site_id=UUID_TO_BIN(@site) LIMIT 1;",
             ("@site", site.ToString())))[0][0]);
-        var schedule = await new CollectionScheduleStore(new MySqlDatabase(cs)).CreateAsync(new CreateCollectionScheduleCommand(tenant, site,
+        var schedule = await new CollectionScheduleStore(new MySqlDatabase(cs)).CreateAutomaticPlanAsync(new CreateCollectionScheduleCommand(tenant, site,
             PromptMonitoringIdentity.ScheduleName, "daily", null, "09:00", "UTC",
             new CollectionScheduleSelection([prompt], [ChatGpt], sampleCount), Enabled: false));
         Assert.Equal(sampleCount, schedule.Selection.SampleCount);

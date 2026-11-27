@@ -9,7 +9,7 @@ namespace Jogeoai.Domain;
 /// <param name="OfflineSeconds">失联了多少秒：从最近一次出现（从未出现时从登记时间）算到数据截止时刻。</param>
 public sealed record AppOfflineNodeAlert(string NodeId, DateTimeOffset? LastActivityAt, long OfflineSeconds);
 
-/// <summary>停止的 App 绑定。只含节点、设备、平台和账号代号，不含任何账号凭证。</summary>
+/// <summary>停止的 App 绑定（已被运营批准过的；待批准的绑定见 <see cref="AppPendingApprovalBindingAlert"/>）。只含节点、设备、平台和账号代号，不含任何账号凭证。</summary>
 /// <param name="BindingId">绑定标识。</param>
 /// <param name="NodeId">所属节点。</param>
 /// <param name="DeviceId">设备标识（AVD 名称）。</param>
@@ -20,6 +20,20 @@ public sealed record AppOfflineNodeAlert(string NodeId, DateTimeOffset? LastActi
 /// <param name="StoppedSeconds">停止了多少秒（算到数据截止时刻）。</param>
 public sealed record AppStoppedBindingAlert(Guid BindingId, string NodeId, string DeviceId, string PlatformCode, string AccountLabel,
     AppBindingStopReason StopReason, DateTimeOffset StoppedAt, long StoppedSeconds);
+
+/// <summary>
+/// 待批准的 App 绑定：采集节点新登记、还没有被运营批准过。批准之前它不能领取任务，它的失败上报不写事件、不计入平台熔断。
+/// 核对这台设备和账号确实是自己加的之后，调用恢复接口（POST bindings/{bindingId}/resume）批准；不认识的绑定可能意味着节点令牌泄露。
+/// 只含节点、设备、平台和账号代号。
+/// </summary>
+/// <param name="BindingId">绑定标识。</param>
+/// <param name="NodeId">所属节点。</param>
+/// <param name="DeviceId">设备标识（AVD 名称）。</param>
+/// <param name="PlatformCode">平台代码。</param>
+/// <param name="AccountLabel">账号代号。</param>
+/// <param name="RegisteredAt">节点第一次上报这条绑定的时间。</param>
+public sealed record AppPendingApprovalBindingAlert(Guid BindingId, string NodeId, string DeviceId, string PlatformCode, string AccountLabel,
+    DateTimeOffset RegisteredAt);
 
 /// <summary>被暂停或 App 入口被判定为不可用的平台。入口种子即为停用、原因是 APP_CONTENT_UNREADABLE 的平台（文心一言）不在这里。</summary>
 /// <param name="PlatformCode">平台代码。</param>
@@ -66,13 +80,13 @@ public sealed record AppPreSendFailureAlert(Guid BindingId, string NodeId, strin
     string? LastFailureCode, DateTimeOffset LastFailedAt);
 
 /// <summary>
-/// App 渠道当前的告警信息（results.md 8.4 的六项，加上连续发题前失败的绑定）。运营接口的告警视图与每日汇报读同一个查询。
+/// App 渠道当前的告警信息（results.md 8.4 的六项，加上连续发题前失败的绑定和待批准的绑定）。运营接口的告警视图与每日汇报读同一个查询。
 /// 只含节点、设备、平台、账号代号和计数：不含提问原文、租户名称、品牌名称或任何账号凭证。
 /// </summary>
 /// <param name="AsOf">数据截止时刻（数据库的 UTC 时间）；失联时长、停止时长和“过去 24 小时”都按它计算。</param>
-/// <param name="HasAlerts">是否有告警：有失联节点、停止的绑定、暂停或不可用的平台、过去 24 小时有未采集的任务、有平台预计排不到，或者有绑定连续在发题前失败。</param>
+/// <param name="HasAlerts">是否有告警：有失联节点、停止的绑定、暂停或不可用的平台、过去 24 小时有未采集的任务、有平台预计排不到、有绑定连续在发题前失败，或者有待批准的绑定。</param>
 /// <param name="OfflineNodes">失联的节点（超过 15 分钟没有出现）及失联时长，按节点标识排序。</param>
-/// <param name="StoppedBindings">停止的绑定及原因、停止了多久，按平台、节点、设备排序。</param>
+/// <param name="StoppedBindings">停止的绑定及原因、停止了多久，按平台、节点、设备排序。不含待批准的绑定（它们单独列在 pendingApprovalBindings 里）。</param>
 /// <param name="Platforms">被暂停或判定不可用的平台，按平台顺序。</param>
 /// <param name="NotCollectedLast24Hours">过去 24 小时内未采集的任务数，按平台和原因分列。</param>
 /// <param name="ActivityLast24Hours">过去 24 小时的领取、成功、失败次数，每个已知平台一行。</param>
@@ -87,6 +101,12 @@ public sealed record AppAlertsView(DateTimeOffset AsOf, bool HasAlerts, IReadOnl
     /// 只是提示：不会因此停用绑定或暂停平台。
     /// </summary>
     public IReadOnlyList<AppPreSendFailureAlert> PreSendFailures { get; init; } = [];
+
+    /// <summary>
+    /// 待批准的绑定，按节点、设备、平台排序；没有时为空数组（这一项加入之前存档的汇报里也是空数组）。
+    /// 它们不出现在 stoppedBindings 里。数量受每个节点的设备上限 × 平台数限制。
+    /// </summary>
+    public IReadOnlyList<AppPendingApprovalBindingAlert> PendingApprovalBindings { get; init; } = [];
 }
 
 /// <summary>每日告警汇报的历史列表中的一项（不含内容）。</summary>
@@ -160,18 +180,19 @@ public static class AppDailyReportRules
         return TimeOnly.FromDateTime(local.DateTime) >= localTime ? DateOnly.FromDateTime(local.DateTime) : null;
     }
 
-    /// <summary>是否有告警：任一列表非空、过去 24 小时有未采集的任务，或者有平台预计排不到。领取、成功、失败次数只是统计，不算告警。</summary>
+    /// <summary>是否有告警：任一列表非空（含待批准的绑定）、过去 24 小时有未采集的任务，或者有平台预计排不到。领取、成功、失败次数只是统计，不算告警。</summary>
     /// <param name="offline">失联的节点。</param>
     /// <param name="stopped">停止的绑定。</param>
     /// <param name="platforms">暂停或不可用的平台。</param>
     /// <param name="notCollected">过去 24 小时的未采集数。</param>
     /// <param name="capacity">容量占用。</param>
     /// <param name="preSendFailures">最近连续在发题前失败的绑定。</param>
+    /// <param name="pendingApproval">待批准的绑定；不提供时按没有处理。</param>
     public static bool HasAlerts(IReadOnlyCollection<AppOfflineNodeAlert> offline, IReadOnlyCollection<AppStoppedBindingAlert> stopped,
         IReadOnlyCollection<AppPlatformAlert> platforms, IEnumerable<AppNotCollectedCount> notCollected, IEnumerable<AppCapacityUsage> capacity,
-        IReadOnlyCollection<AppPreSendFailureAlert> preSendFailures)
+        IReadOnlyCollection<AppPreSendFailureAlert> preSendFailures, IReadOnlyCollection<AppPendingApprovalBindingAlert>? pendingApproval = null)
         => offline.Count > 0 || stopped.Count > 0 || platforms.Count > 0 || notCollected.Any(item => item.Count > 0)
-           || capacity.Any(item => item.Capacity.ExpectedUncollected > 0) || preSendFailures.Count > 0;
+           || capacity.Any(item => item.Capacity.ExpectedUncollected > 0) || preSendFailures.Count > 0 || pendingApproval is { Count: > 0 };
 
     /// <summary>周需求占周容量的百分比（四舍五入为整数）；周容量不大于 0 时为空。</summary>
     /// <param name="capacity">平台的容量视图。</param>
@@ -203,6 +224,7 @@ public static class AppDailyReportRules
             var shortPlatforms = alerts.Capacity.Count(item => item.Capacity.ExpectedUncollected > 0);
             if (shortPlatforms > 0) parts.Add($"预计排不到的平台 {shortPlatforms} 个");
             if (alerts.PreSendFailures.Count > 0) parts.Add($"连续发题前失败的绑定 {alerts.PreSendFailures.Count} 条");
+            if (alerts.PendingApprovalBindings.Count > 0) parts.Add($"待批准的绑定 {alerts.PendingApprovalBindings.Count} 条");
             text.Append("结论：有告警（").Append(string.Join("，", parts)).AppendLine("）。");
         }
 
@@ -257,6 +279,12 @@ public static class AppDailyReportRules
             text.Append("  - ").Append(Platform(binding.PlatformCode)).Append(' ').Append(binding.NodeId).Append(" / ").Append(binding.DeviceId)
                 .Append(" / ").Append(binding.AccountLabel).Append("：最近一次 ").Append(binding.LastFailureCode ?? "未注明失败码")
                 .Append("，").AppendLine(Utc(binding.LastFailedAt));
+
+        text.AppendLine().AppendLine("八、待批准的绑定（新登记，批准前不能领取任务；核对后在后台调用恢复接口批准）");
+        if (alerts.PendingApprovalBindings.Count == 0) text.AppendLine("  无");
+        foreach (var binding in alerts.PendingApprovalBindings)
+            text.Append("  - ").Append(binding.NodeId).Append(" / ").Append(binding.DeviceId).Append(" / ").Append(Platform(binding.PlatformCode))
+                .Append(" / ").Append(binding.AccountLabel).Append("：登记于 ").AppendLine(Utc(binding.RegisteredAt));
 
         var body = text.ToString();
         const string truncated = "\n……（正文过长，已截断；完整内容见汇报的告警信息）";

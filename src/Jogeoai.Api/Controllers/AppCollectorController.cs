@@ -1,8 +1,10 @@
 using System.Globalization;
+using Jogeoai.Api.Security;
 using Jogeoai.Application;
 using Jogeoai.Domain;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.RateLimiting;
 
 namespace Jogeoai.Api.Controllers;
 
@@ -11,16 +13,26 @@ namespace Jogeoai.Api.Controllers;
 /// （Authorization: Bearer）认证：节点身份由令牌确定，请求里的 nodeId 必须与之一致。网页采集器的共享令牌在这里无效。
 /// 新增 action 必须同步白名单测试。
 /// </summary>
+/// <remarks>
+/// 节点令牌由 <see cref="AppNodeAuthenticationFilter"/> 在模型绑定之前校验：令牌无效或节点被停用时不读取请求体。
+/// 每个动作都有请求体大小上限（<see cref="CollectorRequestLimits"/>，超限返回 413），整个控制器按客户端 IP 限流
+/// （<see cref="CollectorRateLimit"/>，超限返回 429 并带 Retry-After）。新增 action 必须标注 <c>[RequestSizeLimit]</c>。
+/// </remarks>
 [ApiController]
 [AllowAnonymous]
+[AppNodeAuthenticationFilter]
+[EnableRateLimiting(CollectorRateLimit.Policy)]
 [Route("internal/collector/app")]
 public sealed class AppCollectorController(IAppCollectorPoolStore store) : ControllerBase
 {
     /// <summary>
     /// 上报本节点的绑定（设备 × App × 账号）及其健康状态。返回每条被接受的绑定在控制面里的状态（限速值以控制面为准），
     /// 以及被拒绝的绑定和原因；一条被拒绝不影响其余各条。
+    /// 新登记的绑定要等运营批准：批准之前它的状态是 stopped、停止原因是 disabled_by_operator，上报的健康状态不能让它生效。
+    /// 节点已登记的不同设备数达到上限（默认 4 台）时，新设备的绑定出现在 rejected 里，code 为 device_limit_exceeded，不会被登记。
     /// </summary>
     [HttpPost("bindings/report")]
+    [RequestSizeLimit(CollectorRequestLimits.AppBindingReport)]
     [ProducesResponseType(typeof(AppBindingReportResponse), StatusCodes.Status200OK)]
     public async Task<ActionResult<AppBindingReportResponse>> ReportBindings([FromBody] AppBindingReportRequest request,
         CancellationToken cancellationToken)
@@ -39,6 +51,7 @@ public sealed class AppCollectorController(IAppCollectorPoolStore store) : Contr
 
     /// <summary>为一个绑定领取至多一条 App 任务；没有领到时 task 为 null，并给出原因和建议的重试间隔。</summary>
     [HttpPost("leases")]
+    [RequestSizeLimit(CollectorRequestLimits.SmallBody)]
     [ProducesResponseType(typeof(AppLeaseResponse), StatusCodes.Status200OK)]
     public async Task<ActionResult<AppLeaseResponse>> Lease([FromBody] AppLeaseRequest request, CancellationToken cancellationToken)
     {
@@ -58,6 +71,7 @@ public sealed class AppCollectorController(IAppCollectorPoolStore store) : Contr
 
     /// <summary>确认当前设备实际发题的时刻；重放不会延长设备冷却。</summary>
     [HttpPost("sent")]
+    [RequestSizeLimit(CollectorRequestLimits.SmallBody)]
     [ProducesResponseType(typeof(AppSentResponse), StatusCodes.Status200OK)]
     public async Task<ActionResult<AppSentResponse>> Sent([FromBody] AppSentRequest request, CancellationToken cancellationToken)
     {
@@ -72,8 +86,13 @@ public sealed class AppCollectorController(IAppCollectorPoolStore store) : Contr
         catch (CollectorStoreException exception) { return StatusCode(exception.StatusCode, Error(exception)); }
     }
 
-    /// <summary>续租当前任务；租约已不是当前租约或已过期时返回 409 STALE_LEASE。</summary>
+    /// <summary>
+    /// 续租当前任务；租约已不是当前租约或已过期时返回 409 STALE_LEASE。
+    /// 一次租约从领取起最多续到总时长上限（默认 1800 秒），也不超过任务的截止时点：返回的截止时间可能早于“现在 + extendSeconds”；
+    /// 已超过上限或截止时点时同样返回 409 STALE_LEASE。
+    /// </summary>
     [HttpPost("heartbeats")]
+    [RequestSizeLimit(CollectorRequestLimits.SmallBody)]
     [ProducesResponseType(typeof(CollectorHeartbeatResponse), StatusCodes.Status200OK)]
     public async Task<ActionResult<CollectorHeartbeatResponse>> Heartbeat([FromBody] AppHeartbeatRequest request, CancellationToken cancellationToken)
     {
@@ -91,8 +110,10 @@ public sealed class AppCollectorController(IAppCollectorPoolStore store) : Contr
     /// <summary>
     /// 上报分类失败：立即释放租约，按失败码处理绑定（停止或冷却）、任务（重新排队或终态）和平台（暂停或入口不可用）。
     /// 响应里的 cooldownUntil 是处理后绑定仍在生效的冷却截止时间；任务终态时它预留的积分随即释放。
+    /// 还没有被运营批准的绑定的上报不生效：响应是绑定的当前状态，带任务时 taskDisposition 为 stale。
     /// </summary>
     [HttpPost("failures")]
+    [RequestSizeLimit(CollectorRequestLimits.SmallBody)]
     [ProducesResponseType(typeof(AppFailureResponse), StatusCodes.Status200OK)]
     public async Task<ActionResult<AppFailureResponse>> Failure([FromBody] AppFailureRequest request, CancellationToken cancellationToken)
     {
@@ -134,6 +155,7 @@ public sealed class AppCollectorController(IAppCollectorPoolStore store) : Contr
     /// 接受后该检测扣 10 积分；没有 URL 的引用不进入引用表，只随回答保存。绑定和账号代号由控制面从租约取，不在请求里。
     /// </summary>
     [HttpPost("results")]
+    [RequestSizeLimit(CollectorRequestLimits.AppResult)]
     [ProducesResponseType(typeof(AppResultResponse), StatusCodes.Status200OK)]
     public async Task<ActionResult<AppResultResponse>> Result([FromBody] AppResultRequest request, CancellationToken cancellationToken)
     {
@@ -170,19 +192,32 @@ public sealed class AppCollectorController(IAppCollectorPoolStore store) : Contr
     /// <summary>
     /// 节点鉴权：令牌未知 401；节点被停用 403 APP_NODE_DISABLED；请求里的 nodeId 与令牌对应的节点不一致 403 APP_NODE_MISMATCH。
     /// 返回值是令牌对应的节点标识，后续处理只使用它。
+    /// 令牌与停用状态已由 <see cref="AppNodeAuthenticationFilter"/> 在模型绑定之前检查，这里从 HttpContext.Items 读取结果，不再查库；
+    /// 动作没有经过 MVC 过滤器管道（例如被直接调用）时 Items 里没有节点，就在这里按同一规则鉴权，不存在未鉴权的执行路径。
     /// </summary>
     private async Task<string> AuthenticateAsync(string? claimedNodeId, CancellationToken cancellationToken)
     {
-        var provided = Request.Headers.Authorization.ToString();
-        var token = provided.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase) ? provided[7..].Trim() : string.Empty;
-        var node = token.Length == 0 ? null : await store.AuthenticateNodeAsync(token, cancellationToken);
-        if (node is null) throw new CollectorStoreException("UNAUTHORIZED", "App collector node authentication failed.", 401);
-        if (node.Status != AppNodeStatus.Active) throw new CollectorStoreException("APP_NODE_DISABLED", "该采集节点已被停用。", 403);
+        var node = AppNodeAuthenticationFilter.GetNode(HttpContext) ?? await AuthenticateNodeAsync(Request, store, cancellationToken);
         if (claimedNodeId is not { Length: >= 1 and <= 128 })
             throw new CollectorStoreException("INVALID_REQUEST", "nodeId 必须为 1–128 个字符。", 400);
         if (!string.Equals(claimedNodeId, node.NodeId, StringComparison.Ordinal))
             throw new CollectorStoreException("APP_NODE_MISMATCH", "请求里的 nodeId 与令牌对应的节点不一致。", 403);
         return node.NodeId;
+    }
+
+    /// <summary>
+    /// 只依赖请求头的节点鉴权，过滤器与动作共用：没有 Bearer 令牌时不查库；令牌未知 401 UNAUTHORIZED；
+    /// 节点被停用 403 APP_NODE_DISABLED。Store 抛出的错误（例如未执行迁移 049 的 503）原样向上传递。
+    /// </summary>
+    internal static async Task<AppNodeIdentity> AuthenticateNodeAsync(HttpRequest request, IAppCollectorPoolStore store,
+        CancellationToken cancellationToken)
+    {
+        var provided = request.Headers.Authorization.ToString();
+        var token = provided.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase) ? provided[7..].Trim() : string.Empty;
+        var node = token.Length == 0 ? null : await store.AuthenticateNodeAsync(token, cancellationToken);
+        if (node is null) throw new CollectorStoreException("UNAUTHORIZED", "App collector node authentication failed.", 401);
+        if (node.Status != AppNodeStatus.Active) throw new CollectorStoreException("APP_NODE_DISABLED", "该采集节点已被停用。", 403);
+        return node;
     }
 
     private static Guid ParseBinding(string? value)
@@ -200,6 +235,9 @@ public sealed class AppCollectorController(IAppCollectorPoolStore store) : Contr
 
     private static object Error(CollectorStoreException exception) => new { error = new { code = exception.Code, message = exception.Message } };
 
+    /// <summary>过滤器短路时使用的错误响应：与动作内 <c>StatusCode(exception.StatusCode, Error(exception))</c> 的状态码和响应体相同。</summary>
+    internal static ObjectResult ErrorResult(CollectorStoreException exception) => new(Error(exception)) { StatusCode = exception.StatusCode };
+
     private static AppTaskResponse ToResponse(AppLeasedTask task) => new(task.Id, task.TenantId, task.RunId, task.CheckId, task.SiteId,
         task.PlatformCode, task.PlatformEntryCode, task.PromptId, task.QuestionText, task.Region, task.Language, task.Channel,
         task.PromptRuleVersion, IsoUtc(task.DeadlineAt), task.LeaseVersion, IsoUtc(task.LeaseExpiresAt), task.BindingId);
@@ -216,7 +254,7 @@ public sealed record AppBindingReportRequest(string? NodeId, string? CollectorBu
 
 /// <summary>绑定上报的响应。bindings 与 rejected 合起来与请求里的绑定一一对应，用 deviceId 和 platformCode 对应。</summary>
 /// <param name="Bindings">被接受的绑定在控制面里的状态。</param>
-/// <param name="Rejected">被拒绝的绑定及原因；没有时为空数组。</param>
+/// <param name="Rejected">被拒绝的绑定及原因；没有时为空数组。超出节点设备上限的绑定的 code 为 device_limit_exceeded。</param>
 /// <param name="DispatchProtocol">设备级派单协议；采集器须核对此值后才领取。</param>
 public sealed record AppBindingReportResponse(IReadOnlyList<AppBindingResponse> Bindings, IReadOnlyList<AppBindingRejection> Rejected,
     string DispatchProtocol = AppPoolRules.DispatchProtocol);
@@ -225,8 +263,8 @@ public sealed record AppBindingReportResponse(IReadOnlyList<AppBindingResponse> 
 /// <param name="DeviceId">设备标识（请求值去掉首尾空白后的值）。</param>
 /// <param name="PlatformCode">平台代码（规范的小写代码）。</param>
 /// <param name="BindingId">控制面生成的绑定标识，领取和失败上报时使用。</param>
-/// <param name="Status">绑定状态：active 或 stopped。</param>
-/// <param name="StopReason">停止原因；未停止时为 null。</param>
+/// <param name="Status">绑定状态：active 或 stopped。新登记、等待运营批准的绑定是 stopped。</param>
+/// <param name="StopReason">停止原因；未停止时为 null。等待运营批准的绑定是 disabled_by_operator。</param>
 /// <param name="CooldownUntil">仍在生效的冷却截止时间（ISO 8601 UTC，以 Z 结尾）；不在冷却中时为 null。</param>
 /// <param name="MinIntervalSeconds">兼容字段：返回设备级两次发送的最小间隔，不作为绑定闸门。</param>
 /// <param name="DailyQuota">兼容字段：设备级派单不设配额，返回 null。</param>
@@ -284,7 +322,7 @@ public sealed record AppTaskResponse(Guid Id, Guid TenantId, Guid RunId, Guid Ch
 /// <param name="NodeId">节点标识，必须与令牌对应的节点一致。</param>
 /// <param name="TaskId">采集任务标识。</param>
 /// <param name="LeaseVersion">持有的租约版本（正整数）。</param>
-/// <param name="ExtendSeconds">从现在起延长的秒数（5–900）。</param>
+/// <param name="ExtendSeconds">从现在起延长的秒数（5–900）；实际截止时间不超过租约的总时长上限和任务的截止时点。</param>
 public sealed record AppHeartbeatRequest(string? NodeId, string? TaskId, int LeaseVersion, int ExtendSeconds = 60);
 
 /// <summary>App 采集器的分类失败上报。probe 阶段不带 task；pre_send / post_send 必须带 task。</summary>

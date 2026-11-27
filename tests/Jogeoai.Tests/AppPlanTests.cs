@@ -147,11 +147,13 @@ public sealed class AppPlanTests
         Assert.True(PromptMonitoringIdentity.IsAppSchedule(PromptMonitoringIdentity.AppScheduleName));
         Assert.Null(PromptMonitoringIdentity.SlotKind(PromptMonitoringIdentity.AppScheduleName));
         Assert.False(PromptMonitoringIdentity.IsAutomaticSchedule(PromptMonitoringIdentity.AppScheduleName));
-        // An App slot would not be charged or scoped like a monitoring run even if a run command were built for it; the
-        // slot processing never builds one (AppPlanSqlTests).
+        // The slot processing never builds an API run command for an App slot (AppPlanSqlTests); the App cycle reserves
+        // through AppCreditReservations. If one were built, it would be charged like every other slot run (charging never
+        // depends on the plan name) and would not be scoped like a monitoring run.
         var command = CollectionScheduleStore.SlotRunCommand(Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid(), PromptMonitoringIdentity.AppScheduleName,
             "20261109T0911", new([Guid.NewGuid()], [new CloroVisibilityTarget("cloro", "chatgpt", "en-US", "US", "{}")]));
-        Assert.False(command.ChargeMonitoringCredits);
+        Assert.True(command.ChargeMonitoringCredits);
+        Assert.Null(command.PromptTargetKeys);
     }
 
     [Fact]

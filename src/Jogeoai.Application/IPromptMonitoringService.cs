@@ -49,4 +49,14 @@ public interface IPromptMonitoringService
     /// <param name="cancellationToken">取消令牌。</param>
     Task<InstantCollectionView?> CollectAddedTargetsAsync(Guid tenantId, Guid siteId, PromptView before, PromptView after,
         CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// 提问写入（新建、导入、批量创建、编辑、启停）后同步品牌的 App 计划：当前周期尚未覆盖的「提问 × App 平台」（例如新提问、
+    /// 新启用的提问、平台范围新加入 App 平台）立即进入一个即时时隙，Worker 下一轮展开成采集任务，不等下一个每周时隙。
+    /// 尽力而为：租户未开放 App 渠道、计划不存在或已暂停时不做任何事，失败不抛异常，下一次懒对账会重试。
+    /// </summary>
+    /// <param name="tenantId">租户标识。</param>
+    /// <param name="siteId">品牌标识。</param>
+    /// <param name="cancellationToken">取消令牌。</param>
+    Task SyncAppPlanAsync(Guid tenantId, Guid siteId, CancellationToken cancellationToken = default) => Task.CompletedTask;
 }

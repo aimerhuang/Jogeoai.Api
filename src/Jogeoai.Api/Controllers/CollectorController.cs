@@ -1,11 +1,13 @@
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using Jogeoai.Api.Security;
 using Jogeoai.Application;
 using Jogeoai.Domain;
 using Jogeoai.Infrastructure;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.RateLimiting;
 
 namespace Jogeoai.Api.Controllers;
 
@@ -13,13 +15,22 @@ namespace Jogeoai.Api.Controllers;
 /// 供国内 Node.js Collector 使用的内部控制面接口。不走用户会话（匿名白名单），每个写入/领取动作由服务令牌
 /// （Bearer <c>Collector:ChinaServiceToken</c>）认证；health 无令牌且只返回固定字段。新增 action 必须同步白名单测试。
 /// </summary>
+/// <remarks>
+/// 服务令牌由 <see cref="CollectorServiceTokenFilter"/> 在模型绑定之前校验：令牌无效时不读取请求体；区域与租户名单依赖请求体，
+/// 仍在动作内检查。每个 POST 动作都有请求体大小上限（<see cref="CollectorRequestLimits"/>，超限返回 413），整个控制器（含 health）
+/// 按客户端 IP 限流（<see cref="CollectorRateLimit"/>，超限返回 429 并带 Retry-After）。
+/// 新增需要令牌的 action 必须同时标注 <c>[CollectorServiceTokenFilter]</c> 与 <c>[RequestSizeLimit]</c>。
+/// </remarks>
 [ApiController]
 [AllowAnonymous]
+[EnableRateLimiting(CollectorRateLimit.Policy)]
 [Route("internal/collector")]
 public sealed class CollectorController(IVisibilityCollectorStore store, IConfiguration configuration, MySqlDatabase database) : ControllerBase
 {
     /// <summary>领取一批带租约的国内采集任务；带 sessionProfileId 时走账号池派发（capacity 固定为 1，未通过配额或闸门时返回空列表）。</summary>
     [HttpPost("leases")]
+    [CollectorServiceTokenFilter]
+    [RequestSizeLimit(CollectorRequestLimits.SmallBody)]
     public async Task<ActionResult<CollectorLeaseResponse>> Lease([FromBody] CollectorLeaseRequest request, CancellationToken cancellationToken)
     {
         try
@@ -41,6 +52,8 @@ public sealed class CollectorController(IVisibilityCollectorStore store, IConfig
 
     /// <summary>续租当前采集任务。</summary>
     [HttpPost("heartbeats")]
+    [CollectorServiceTokenFilter]
+    [RequestSizeLimit(CollectorRequestLimits.SmallBody)]
     public async Task<ActionResult<CollectorHeartbeatResponse>> Heartbeat([FromBody] CollectorHeartbeatRequest request, CancellationToken cancellationToken)
     {
         try
@@ -54,6 +67,8 @@ public sealed class CollectorController(IVisibilityCollectorStore store, IConfig
 
     /// <summary>接收 Collector 回答并幂等写入检查、引用和审计记录。</summary>
     [HttpPost("results")]
+    [CollectorServiceTokenFilter]
+    [RequestSizeLimit(CollectorRequestLimits.WebResult)]
     public async Task<ActionResult<CollectorResultResponse>> Result([FromBody] CollectorResultRequest request, CancellationToken cancellationToken)
     {
         try
@@ -76,6 +91,8 @@ public sealed class CollectorController(IVisibilityCollectorStore store, IConfig
 
     /// <summary>账号模式 Collector 访问平台页面前的只读预检；与租约共用账号、公平、平台闸门和待领任务判定，但不产生租约。</summary>
     [HttpPost("eligibility")]
+    [CollectorServiceTokenFilter]
+    [RequestSizeLimit(CollectorRequestLimits.SmallBody)]
     [ProducesResponseType(typeof(CollectorEligibilityResult), StatusCodes.Status200OK)]
     public async Task<ActionResult<CollectorEligibilityResult>> Eligibility([FromBody] CollectorEligibilityRequest request,
         [FromServices] ICollectorSessionPoolStore pool, CancellationToken cancellationToken)
@@ -95,6 +112,8 @@ public sealed class CollectorController(IVisibilityCollectorStore store, IConfig
 
     /// <summary>上报分类失败：立即释放租约并按退避重新入队，更新账号健康状态并判断平台熔断。</summary>
     [HttpPost("failures")]
+    [CollectorServiceTokenFilter]
+    [RequestSizeLimit(CollectorRequestLimits.SmallBody)]
     [ProducesResponseType(typeof(CollectorFailureResult), StatusCodes.Status200OK)]
     public async Task<ActionResult<CollectorFailureResult>> Failure([FromBody] CollectorFailureRequest request,
         [FromServices] ICollectorSessionPoolStore pool, CancellationToken cancellationToken)
@@ -118,6 +137,8 @@ public sealed class CollectorController(IVisibilityCollectorStore store, IConfig
 
     /// <summary>上报非失败账号事件：验证码等待开始、验证码消失，或运维 probe 成功后的 verified。</summary>
     [HttpPost("session-events")]
+    [CollectorServiceTokenFilter]
+    [RequestSizeLimit(CollectorRequestLimits.SmallBody)]
     [ProducesResponseType(typeof(CollectorSessionEventResult), StatusCodes.Status200OK)]
     public async Task<ActionResult<CollectorSessionEventResult>> SessionEvent([FromBody] CollectorSessionEventRequest request,
         [FromServices] ICollectorSessionPoolStore pool, CancellationToken cancellationToken)
@@ -210,15 +231,13 @@ public sealed class CollectorController(IVisibilityCollectorStore store, IConfig
         return new CollectorReportedTask(taskId, task.LeaseVersion);
     }
 
+    // 服务令牌已由 CollectorServiceTokenFilter 在模型绑定之前校验过一次；这里按原有顺序（区域 → 令牌 → 租户名单）再检查，
+    // 令牌比较不查库，动作被直接调用（不经过过滤器管道）时也不会跳过鉴权。
     private CollectorRegion Authenticate(string? claimedRegion, Guid? tenantId = null)
     {
         if (!string.Equals(claimedRegion, "cn", StringComparison.OrdinalIgnoreCase))
             throw new CollectorStoreException("COLLECTOR_REGION_FORBIDDEN", "Only cn collectors are enabled.", 403);
-        var expected = configuration["Collector:ChinaServiceToken"];
-        var provided = Request.Headers.Authorization.ToString();
-        var token = provided.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase) ? provided[7..] : string.Empty;
-        if (string.IsNullOrWhiteSpace(expected) || !FixedEquals(token, expected))
-            throw new CollectorStoreException("UNAUTHORIZED", "Collector service authentication failed.", 401);
+        RequireServiceToken(Request, configuration);
         if (tenantId is { } requestedTenant)
         {
             var allowedTenantIds = configuration.GetSection("Collector:ChinaTenantIds").Get<string[]>() ?? [];
@@ -226,6 +245,19 @@ public sealed class CollectorController(IVisibilityCollectorStore store, IConfig
                 throw new CollectorStoreException("TENANT_NOT_ALLOWED", "Collector tenant is not allowed.", 403);
         }
         return CollectorRegion.Cn;
+    }
+
+    /// <summary>
+    /// 只依赖请求头的共享令牌校验，过滤器与动作共用：服务端没有配置令牌（缺失或空白）、请求没有 Bearer 令牌或令牌不一致时
+    /// 抛出 401 UNAUTHORIZED。比较是定长的，不查库。
+    /// </summary>
+    internal static void RequireServiceToken(HttpRequest request, IConfiguration configuration)
+    {
+        var expected = configuration["Collector:ChinaServiceToken"];
+        var provided = request.Headers.Authorization.ToString();
+        var token = provided.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase) ? provided[7..] : string.Empty;
+        if (string.IsNullOrWhiteSpace(expected) || !FixedEquals(token, expected))
+            throw new CollectorStoreException("UNAUTHORIZED", "Collector service authentication failed.", 401);
     }
 
     private static bool FixedEquals(string provided, string expected)
@@ -236,6 +268,9 @@ public sealed class CollectorController(IVisibilityCollectorStore store, IConfig
     }
 
     private static object Error(CollectorStoreException exception) => new { error = new { code = exception.Code, message = exception.Message } };
+
+    /// <summary>过滤器短路时使用的错误响应：与动作内 <c>StatusCode(exception.StatusCode, Error(exception))</c> 的状态码和响应体相同。</summary>
+    internal static ObjectResult ErrorResult(CollectorStoreException exception) => new(Error(exception)) { StatusCode = exception.StatusCode };
 
     private static CollectorTaskResponse ToResponse(LeasedCollectorTask task) => new(
         task.Id, task.TenantId, task.RunId, task.CheckId, task.SiteId, task.PlatformCode, task.PlatformEntryCode,

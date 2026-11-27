@@ -66,7 +66,7 @@ public sealed partial class AppSiteTargetsSqlTests
         var individual = await SeedBrandAsync(cs, tenant, "单独", follows: false, locale: "zh-CN", created: "2026-05-04");
         await SeedTargetAsync(cs, tenant, individual, "cloro", "copilot", "US", "en-US", enabled: true, anchor: "2026-01-01");
         var store = OpenStore(cs, tenant);
-        var tomorrow = Day(Today().AddDays(1));
+        var enablingDay = Day(Today());
 
         // Before any save: the virtual baseline, without App cells; first monitoring of this brand is not materialized.
         var initial = await store.GetTeamMonitoringConfigAsync(tenant);
@@ -84,13 +84,13 @@ public sealed partial class AppSiteTargetsSqlTests
         Assert.DoesNotContain(saved.Cells.Take(api.Length), c => c.Provider == "app_collector");
         Assert.Equal("千问", saved.Cells.Single(c => c.Provider == "app_collector" && c.Engine == "qwen").DisplayName);
 
-        // The follower has every cell; its App rows are CN / zh-CN / app (not the brand's en-GB), weekly, anchored tomorrow.
+        // The follower has every cell; its App rows are CN / zh-CN / app (not the brand's en-GB), weekly, anchored on the enabling day.
         var rows = await TargetRowsAsync(cs, follower);
         Assert.Equal(api.Length + 6, rows.Count(r => r.Value.Enabled));
         foreach (var engine in AvailableApps.Select(a => a.Engine))
         {
             var row = rows[CollectionIdentity.AppTargetKey(engine)];
-            Assert.Equal(new TargetRow("app_collector", engine, "app", "CN", "zh-CN", true, null, "weekly", tomorrow, true, row.UpdatedAt), row);
+            Assert.Equal(new TargetRow("app_collector", engine, "app", "CN", "zh-CN", true, null, "weekly", enablingDay, true, row.UpdatedAt), row);
         }
         Assert.Equal("en-GB", rows.Values.Single(r => r.Provider == "cloro" && r.Engine == "chatgpt").Locale);
         Assert.Equal(saved.Cells.Select(Cell), saved.Brands.Single(b => b.SiteId == follower).Cells.Select(Cell));
@@ -117,7 +117,7 @@ public sealed partial class AppSiteTargetsSqlTests
         targets = await store.FollowTeamDefaultAsync(tenant, individual, new FollowTeamDefaultRequest(targets.ConfigVersion));
         Assert.True(targets.FollowsTeamDefault);
         Assert.Equal(["cloro:chatgpt", "app_collector:doubao"], targets.Items.Where(i => i.Enabled).Select(i => $"{i.Provider}:{i.Engine}"));
-        Assert.Equal(tomorrow, (await TargetRowsAsync(cs, individual))[CollectionIdentity.AppTargetKey("doubao")].Anchor);
+        Assert.Equal(enablingDay, (await TargetRowsAsync(cs, individual))[CollectionIdentity.AppTargetKey("doubao")].Anchor);
         // The follower materialization used for estimates keeps the fixed App surface as well.
         var materialized = (await store.MaterializeTeamCellsForFollowersAsync(tenant, [new("app_collector", "kimi", null, MonitoringFrequency.Weekly)]))
             .Single(b => b.SiteId == follower);

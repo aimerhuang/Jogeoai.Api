@@ -5,14 +5,27 @@ namespace Jogeoai.Application;
 /// <summary>计划管理、到期领取与崩溃恢复的应用层契约。</summary>
 public interface ICollectionScheduleStore
 {
-    /// <summary>创建计划；未指定启用时默认为关闭。</summary>
+    /// <summary>
+    /// 创建自定义计划；未指定启用时默认为关闭。名称为系统保留名称（每日监控主计划、凌晨计划）时返回 409 SCHEDULE_NAME_RESERVED，
+    /// App 采集计划名称返回 400 INVALID_SCHEDULE_NAME；站点的自定义计划数量达到上限时返回 409 SCHEDULE_LIMIT_REACHED。
+    /// 公开接口只能调用本方法。
+    /// </summary>
     Task<CollectionScheduleView> CreateAsync(CreateCollectionScheduleCommand command, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// 创建系统维护的每日监控计划（名称必须是每日监控主计划或凌晨计划的保留名称，否则抛出 <see cref="ArgumentException"/>）。
+    /// 仅供服务端内部（每日监控服务）调用：不做保留名称与数量上限校验，公开接口不得调用。
+    /// </summary>
+    Task<CollectionScheduleView> CreateAutomaticPlanAsync(CreateCollectionScheduleCommand command, CancellationToken cancellationToken = default);
 
     /// <summary>按租户和站点稳定分页列出计划。</summary>
     Task<CursorPage<CollectionScheduleView>> ListAsync(Guid tenantId, Guid siteId,
         string? cursor, int limit, CancellationToken cancellationToken = default);
 
-    /// <summary>修改计划；跨租户或不存在时返回 null。</summary>
+    /// <summary>
+    /// 修改计划；跨租户或不存在时返回 null。每日监控主计划与凌晨计划不能改名（409 SCHEDULE_NAME_LOCKED），
+    /// 自定义计划不能改名为它们的保留名称（409 SCHEDULE_NAME_RESERVED）。
+    /// </summary>
     Task<CollectionScheduleView?> UpdateAsync(UpdateCollectionScheduleCommand command, CancellationToken cancellationToken = default);
 
     /// <summary>以数据库行锁领取到期计划，只记录最近时隙和遗漏数。</summary>

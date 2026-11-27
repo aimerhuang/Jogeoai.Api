@@ -29,12 +29,65 @@ public static class AppCycleRules
     /// 周期的截止时点（UTC）：时隙的当地时刻加 <see cref="CycleDays"/> 天，即下一个到期时隙的时刻。
     /// 夏令时的处理与计划时隙相同：落在不存在的当地时刻时顺延到第一个有效分钟；落在重复的当地时刻时取较早的 UTC 时刻。
     /// </summary>
-    /// <param name="localSlotKey">时隙键 <c>yyyyMMddTHHmm</c>（<see cref="CollectionScheduleCalendar.LocalSlotKey"/>）。</param>
+    /// <param name="localSlotKey">时隙键 <c>yyyyMMddTHHmm</c>（<see cref="CollectionScheduleCalendar.LocalSlotKey"/>）；即时时隙键 <c>yyyyMMddTHHmmss</c> 也能解析，但即时时隙按平台用 <see cref="InstantDeadlineUtc"/>。</param>
     /// <param name="zone">计划的时区。</param>
-    /// <exception cref="FormatException">时隙键不是 <c>yyyyMMddTHHmm</c>。</exception>
+    /// <exception cref="FormatException">时隙键不是 <c>yyyyMMddTHHmm</c> 或 <c>yyyyMMddTHHmmss</c>。</exception>
     public static DateTimeOffset DeadlineUtc(string localSlotKey, TimeZoneInfo zone)
+        => ResolveUtc(ParseKey(localSlotKey).AddDays(CycleDays), zone);
+
+    /// <summary>
+    /// 时隙的名义时刻（UTC）：时隙键的当地日期与时刻，按 <paramref name="zone"/> 换算；夏令时处理与 <see cref="DeadlineUtc"/> 相同。
+    /// 用于判断一个「提问 × 平台」在该时隙是否已被当前周期覆盖（任务截止晚于这个时刻）。
+    /// </summary>
+    /// <param name="localSlotKey">时隙键 <c>yyyyMMddTHHmm</c>，或即时时隙键 <c>yyyyMMddTHHmmss</c>。</param>
+    /// <param name="zone">计划的时区。</param>
+    /// <exception cref="FormatException">时隙键不是这两种格式。</exception>
+    public static DateTimeOffset NominalUtc(string localSlotKey, TimeZoneInfo zone) => ResolveUtc(ParseKey(localSlotKey), zone);
+
+    /// <summary>
+    /// App 即时时隙的键：当地时刻精确到秒（<c>yyyyMMddTHHmmss</c>），与常规时隙键（<c>yyyyMMddTHHmm</c>）长度不同，不会相撞；
+    /// 同一分钟里先后两次变更（例如先启用平台、再新增提问）各得一个键。
+    /// </summary>
+    /// <param name="local">计划时区的当地时刻。</param>
+    public static string InstantSlotKey(DateTime local) => local.ToString("yyyyMMdd'T'HHmmss", CultureInfo.InvariantCulture);
+
+    /// <summary>
+    /// 是否为 App 即时时隙：键为 <c>yyyyMMddTHHmmss</c>（<see cref="InstantSlotKey"/>），或为时刻部分不是 App 计划固定时刻
+    /// （<see cref="PromptMonitoringIdentity.AppLocalTime"/>，09:11）的 <c>yyyyMMddTHHmm</c>。即时时隙在新启用 App 目标或新增提问后
+    /// 立即插入，只展开当前周期尚未覆盖的「提问 × 平台」。只对 App 计划的时隙有意义；键格式不对时返回 false。
+    /// </summary>
+    /// <param name="localSlotKey">时隙键。</param>
+    public static bool IsInstantSlotKey(string? localSlotKey)
+        => localSlotKey is { Length: 15 }
+            ? DateTime.TryParseExact(localSlotKey, "yyyyMMdd'T'HHmmss", CultureInfo.InvariantCulture, DateTimeStyles.None, out _)
+            : localSlotKey is { Length: 13 }
+              && DateTime.TryParseExact(localSlotKey, "yyyyMMdd'T'HHmm", CultureInfo.InvariantCulture, DateTimeStyles.None, out _)
+              && !localSlotKey.EndsWith(PromptMonitoringIdentity.AppLocalTime.Replace(":", "", StringComparison.Ordinal), StringComparison.Ordinal);
+
+    /// <summary>
+    /// 即时时隙里某个平台的截止时点（UTC）：该平台下一个常规到期时隙的 09:11，即满足「晚于时隙日期、不早于锚点、与锚点同一星期几」
+    /// 的最早日期；锚点为空时为时隙日期 + <see cref="CycleDays"/> 天。这样即时周期正好覆盖到下一个常规时隙，之后按锚点每周继续。
+    /// </summary>
+    /// <param name="slotLocalDate">即时时隙的当地日期。</param>
+    /// <param name="anchor">该平台目标的周期锚点（frequency_anchor）。</param>
+    /// <param name="zone">计划的时区。</param>
+    public static DateTimeOffset InstantDeadlineUtc(DateOnly slotLocalDate, DateOnly? anchor, TimeZoneInfo zone)
     {
-        var local = DateTime.ParseExact(localSlotKey, "yyyyMMdd'T'HHmm", CultureInfo.InvariantCulture, DateTimeStyles.None).AddDays(CycleDays);
+        var date = slotLocalDate.AddDays(CycleDays);
+        if (anchor is { } start)
+        {
+            date = slotLocalDate.AddDays(1);
+            if (date < start) date = start;
+            while (date.DayOfWeek != start.DayOfWeek) date = date.AddDays(1);
+        }
+        return ResolveUtc(date.ToDateTime(CollectionScheduleCalendar.ParseLocalTime(PromptMonitoringIdentity.AppLocalTime)), zone);
+    }
+
+    private static DateTime ParseKey(string localSlotKey)
+        => DateTime.ParseExact(localSlotKey, ["yyyyMMdd'T'HHmm", "yyyyMMdd'T'HHmmss"], CultureInfo.InvariantCulture, DateTimeStyles.None);
+
+    private static DateTimeOffset ResolveUtc(DateTime local, TimeZoneInfo zone)
+    {
         local = DateTime.SpecifyKind(local, DateTimeKind.Unspecified);
         while (zone.IsInvalidTime(local)) local = local.AddMinutes(1);
         var offset = zone.IsAmbiguousTime(local) ? zone.GetAmbiguousTimeOffsets(local).Max() : zone.GetUtcOffset(local);

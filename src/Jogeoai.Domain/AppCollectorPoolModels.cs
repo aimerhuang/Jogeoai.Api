@@ -58,6 +58,48 @@ public static class AppPoolRules
     /// <summary>一次绑定上报最多包含的绑定数。</summary>
     public const int MaxReportedBindings = 200;
 
+    /// <summary>每个节点可登记的不同设备数的默认上限（迁移 052 的列默认值）；系统管理员可按节点调整。</summary>
+    public const int DefaultMaxDevicesPerNode = 4;
+
+    /// <summary>每个节点设备上限可设置的最大值（迁移 052 的 CHECK：1–64）。</summary>
+    public const int MaxDevicesPerNodeLimit = 64;
+
+    /// <summary>绑定上报里因为超出节点设备上限而被拒绝的那一条的错误码；这样的绑定不入库。</summary>
+    public const string DeviceLimitExceededCode = "device_limit_exceeded";
+
+    /// <summary>一次租约从领取起最多可以续到多少秒的默认值（配置项 AppChannel:MaxLeaseTotalSeconds）。</summary>
+    public const int DefaultMaxLeaseTotalSeconds = 1800;
+
+    /// <summary>AppChannel:MaxLeaseTotalSeconds 可设置的最大值（一天）；最小值是单次租约的上限 <see cref="MaxLeaseSeconds"/>。</summary>
+    public const int MaxLeaseTotalSecondsLimit = 86_400;
+
+    /// <summary>
+    /// 一次绑定上报之后这条绑定的停止原因（空值 = active）。新登记的绑定和还没有被运营批准的绑定一律是被运营停用，
+    /// 上报的健康状态不起作用：采集节点上报的任何内容都不能让未批准的绑定生效。已批准的绑定按健康状态转换：
+    /// 上报停止原因时取 <see cref="NextStopReason"/>，上报 ok 时只解除 <see cref="ClearsOnOkReport"/> 的原因。
+    /// </summary>
+    /// <param name="registered">这条绑定（节点、设备、平台）是否已经登记。</param>
+    /// <param name="approved">已登记的绑定是否已被运营批准。</param>
+    /// <param name="current">绑定当前的停止原因；未停止或未登记时为空。</param>
+    /// <param name="reportedHealth">上报的停止原因；上报 ok 时为空。</param>
+    public static AppBindingStopReason? StopReasonAfterReport(bool registered, bool approved, AppBindingStopReason? current,
+        AppBindingStopReason? reportedHealth)
+    {
+        if (!registered || !approved) return AppBindingStopReason.DisabledByOperator;
+        if (reportedHealth is { } reason) return NextStopReason(current, reason);
+        return current is { } stopped && ClearsOnOkReport(stopped) ? null : current;
+    }
+
+    /// <summary>
+    /// 节点上报的一条新绑定是否在设备上限之内：设备已经登记过（同一设备的另一个平台）总是允许；
+    /// 新设备只在已登记的不同设备数还没有达到上限时允许。
+    /// </summary>
+    /// <param name="deviceRegistered">该节点是否已有这台设备的绑定。</param>
+    /// <param name="registeredDevices">该节点已登记的不同设备数。</param>
+    /// <param name="maxDevices">该节点的设备上限。</param>
+    public static bool DeviceWithinLimit(bool deviceRegistered, int registeredDevices, int maxDevices)
+        => deviceRegistered || registeredDevices < maxDevices;
+
     /// <summary>
     /// 在线上报解除旧设备/版本/界面契约停止；登录、验证、App 拒绝模拟器和运营停用仍需人工恢复。
     /// </summary>
@@ -124,8 +166,8 @@ public sealed record AppBindingReportCommand(string NodeId, string CollectorBuil
 /// <param name="DeviceId">请求里的设备标识（原样返回，用于对应）。</param>
 /// <param name="PlatformCode">请求里的平台代码（原样返回，用于对应）。</param>
 /// <param name="BindingId">控制面生成的绑定标识。</param>
-/// <param name="Status">绑定状态。</param>
-/// <param name="StopReason">停止原因；未停止时为空。</param>
+/// <param name="Status">绑定状态。新登记的绑定在运营批准之前是 stopped。</param>
+/// <param name="StopReason">停止原因；未停止时为空。待运营批准的绑定是 disabled_by_operator。</param>
 /// <param name="CooldownUntil">仍在生效的冷却截止时间；不在冷却中时为空。</param>
 /// <param name="MinIntervalSeconds">该绑定两次领取的最小间隔秒数。</param>
 /// <param name="DailyQuota">运营设置的每日领取上限；未设置时为空。</param>
@@ -135,7 +177,7 @@ public sealed record AppBindingState(string DeviceId, string PlatformCode, Guid 
 /// <summary>一条没有被接受的绑定；控制面没有因为它做任何修改（账号重复时另写一条审计事件）。</summary>
 /// <param name="DeviceId">请求里的设备标识（原样返回，用于对应）。</param>
 /// <param name="PlatformCode">请求里的平台代码（原样返回，用于对应）。</param>
-/// <param name="Code">稳定错误码：INVALID_BINDING、INVALID_PLATFORM、INVALID_BINDING_HEALTH、APP_ACCOUNT_ALREADY_BOUND。</param>
+/// <param name="Code">稳定错误码：INVALID_BINDING、INVALID_PLATFORM、INVALID_BINDING_HEALTH、APP_ACCOUNT_ALREADY_BOUND、BINDING_REPORT_CONFLICT，以及超出节点设备上限时的 device_limit_exceeded。</param>
 /// <param name="Message">说明。</param>
 public sealed record AppBindingRejection(string? DeviceId, string? PlatformCode, string Code, string Message);
 
@@ -182,7 +224,7 @@ public sealed record AppLeaseResult(AppLeasedTask? Task, AppLeaseEmptyReason? Re
 /// <param name="NodeId">令牌对应的节点。</param>
 /// <param name="TaskId">采集任务标识。</param>
 /// <param name="LeaseVersion">持有的租约版本。</param>
-/// <param name="ExtendSeconds">从现在起延长的秒数（5–900）。</param>
+/// <param name="ExtendSeconds">从现在起延长的秒数（5–900）；实际截止时间不超过租约的总时长上限和任务的截止时点。</param>
 public sealed record AppHeartbeatCommand(string NodeId, Guid TaskId, int LeaseVersion, int ExtendSeconds);
 
 /// <summary>App 采集器上报的一次分类失败。probe 阶段不带任务；pre_send / post_send 必须带任务。</summary>

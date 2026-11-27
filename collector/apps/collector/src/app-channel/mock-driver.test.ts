@@ -4,7 +4,15 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { MAX_SWIPES_PER_CALL } from "./driver.ts";
 import { descendants, findNodes, parseHierarchy } from "./hierarchy.ts";
-import { MOCK_PACKAGE, MockChatApp, MockDriver, MockDrivers, MockIconApp } from "./mock-driver.ts";
+import {
+  MOCK_FOREIGN_PACKAGE,
+  MOCK_PACKAGE,
+  MOCK_SYSTEM_SHARE_PACKAGE,
+  MockChatApp,
+  MockDriver,
+  MockDrivers,
+  MockIconApp,
+} from "./mock-driver.ts";
 import { DEVICE_A, steppingClock } from "./test-fixtures.ts";
 
 const created: string[] = [];
@@ -139,6 +147,209 @@ describe("mock driver", () => {
     await driver.back();
     expect(await driver.find(id("message_list"))).toHaveLength(1);
     expect(await driver.foregroundPackage()).toBe(MOCK_PACKAGE);
+  });
+  // Task 11-24: the page a source's title opens, its share sheet and the way back.
+  it("opens a source's page from its title, copies its link and goes back to the panel as it was", async () => {
+    const { driver, clock } = chat({
+      generationMs: 1_000,
+      sourcePages: true,
+      sourcesViewport: 2,
+      shareSlideMs: 800,
+      linkOverlayMs: 3_000,
+      citations: [
+        { title: "合成来源一", link: "https://example.com/1" },
+        { title: "合成来源二", link: "https://example.com/2", deadTaps: 1 },
+        { title: "合成来源三", noShare: true },
+        { title: "合成来源四", link: "https://example.com/4", copyMisses: 1 },
+      ],
+    });
+    const title = (text: string) => ({ ...id("tv_reference_content"), text });
+    await ask(driver, "合成问题");
+    clock.advance(1_000);
+    await driver.tap((await driver.find(id("ll_reference_title")))[0]!);
+    await driver.tap((await driver.find(title("合成来源一")))[0]!);
+    expect(await driver.find(id("bullet_container"))).toHaveLength(1);
+    expect(await driver.find(id("bottom_sheet_title"))).toEqual([]);
+    // The top bar: close and share, the page's title; no address anywhere.
+    const page = parseHierarchy(await driver.hierarchy());
+    expect(findNodes(page, id("btn_back"))[0]!.desc).toBe("关闭");
+    expect(findNodes(page, id("tv_title"))[0]!.text).toBe("合成来源一");
+    expect(JSON.stringify([...descendants(page)].map((node) => node.text))).not.toContain(
+      "example.com",
+    );
+    await driver.tap((await driver.find(id("btn_share")))[0]!);
+    // While the sheet slides in, it moves from look to look and "copy link" does nothing.
+    const sheet = async () =>
+      JSON.stringify(
+        [...descendants(parseHierarchy(await driver.hierarchy()))].map((node) => node.bounds),
+      );
+    const first = await sheet();
+    clock.advance(100);
+    expect(await sheet()).not.toBe(first);
+    const copy = (await driver.find({ text: "复制链接" }))[0]!;
+    await driver.tap(copy);
+    expect(await driver.readClipboard()).toBe("");
+    clock.advance(800);
+    expect(await sheet()).toBe(await sheet());
+    await driver.tap((await driver.find({ text: "复制链接" }))[0]!);
+    expect(await driver.readClipboard()).toBe("https://example.com/1");
+    // The copy closes the sheet; the preview then hides the panel's rows for a while.
+    expect(await driver.find({ text: "复制链接" })).toEqual([]);
+    await driver.back();
+    expect(await driver.find(id("bottom_sheet_title"))).toHaveLength(1);
+    expect(await driver.find(id("tv_reference_content"))).toEqual([]);
+    clock.advance(3_000);
+    expect((await driver.find(id("tv_reference_content"))).map((view) => view.text)).toEqual([
+      "合成来源一",
+      "合成来源二",
+    ]);
+    // A title that does not react the first time.
+    await driver.tap((await driver.find(title("合成来源二")))[0]!);
+    expect(await driver.find(id("bullet_container"))).toEqual([]);
+    await driver.tap((await driver.find(title("合成来源二")))[0]!);
+    expect(await driver.find(id("bullet_container"))).toHaveLength(1);
+    // The back key closes the sheet first, then the page; the list is where it was left.
+    await driver.tap((await driver.find(id("btn_share")))[0]!);
+    await driver.back();
+    expect(await driver.find(id("bullet_container"))).toHaveLength(1);
+    await driver.back();
+    // A swipe moves a list of two rows by one.
+    await driver.swipe("up", 2);
+    expect((await driver.find(id("tv_reference_content"))).map((view) => view.text)).toEqual([
+      "合成来源三",
+      "合成来源四",
+    ]);
+    // A page without a share control.
+    await driver.tap((await driver.find(title("合成来源三")))[0]!);
+    expect(await driver.find(id("bullet_container"))).toHaveLength(1);
+    expect(await driver.find(id("btn_share"))).toEqual([]);
+    await driver.back();
+    // A copy that misses leaves the sheet and the clipboard as they were.
+    await driver.tap((await driver.find(title("合成来源四")))[0]!);
+    await driver.tap((await driver.find(id("btn_share")))[0]!);
+    clock.advance(800);
+    await driver.tap((await driver.find({ text: "复制链接" }))[0]!);
+    expect(await driver.readClipboard()).toBe("https://example.com/1");
+    await driver.tap((await driver.find({ text: "复制链接" }))[0]!);
+    expect(await driver.readClipboard()).toBe("https://example.com/4");
+  });
+  // Task 11-24 §11: Android's own share sheet, another App, and a preview over the last rows.
+  // Task 11-24 §13: the preview after "copy link" swallows swipes on the list for a while.
+  it("does not move the source list while the preview after a copy swallows swipes", async () => {
+    const { driver, clock } = chat({
+      generationMs: 0,
+      sourcePages: true,
+      sourcesViewport: 2,
+      linkSwipeSwallowMs: 8_000,
+      citations: [
+        { title: "合成来源一", link: "https://example.com/1" },
+        { title: "合成来源二", link: "https://example.com/2" },
+        { title: "合成来源三", link: "https://example.com/3" },
+      ],
+    });
+    const titles = async () =>
+      (await driver.find(id("tv_reference_content"))).map((view) => view.text);
+    await ask(driver, "合成问题");
+    await driver.tap((await driver.find(id("ll_reference_title")))[0]!);
+    // Before any copy a swipe moves the list.
+    await driver.swipe("up", 1);
+    expect(await titles()).toEqual(["合成来源二", "合成来源三"]);
+    await driver.swipe("down", 1);
+    await driver.tap(
+      (await driver.find({ ...id("tv_reference_content"), text: "合成来源一" }))[0]!,
+    );
+    await driver.tap((await driver.find(id("btn_share")))[0]!);
+    await driver.tap((await driver.find({ text: "复制链接" }))[0]!);
+    await driver.back();
+    // Swallowed for its time, whatever the rows show.
+    await driver.swipe("up", 1);
+    expect(await titles()).toEqual(["合成来源一", "合成来源二"]);
+    clock.advance(8_000);
+    await driver.swipe("up", 1);
+    expect(await titles()).toEqual(["合成来源二", "合成来源三"]);
+  });
+  it("opens Android's share sheet or another App from a source, and hides the last rows under a preview", async () => {
+    const { driver, clock } = chat({
+      generationMs: 0,
+      sourcePages: true,
+      sourcesViewport: 3,
+      linkOverlayMs: 5_000,
+      linkOverlayRows: 2,
+      citations: [
+        { title: "合成来源一", link: "https://example.com/1", systemShare: "dismisses" },
+        { title: "合成来源二", link: "https://example.com/2", systemShare: "stays" },
+        { title: "合成来源三", opensApp: "returns" },
+        { title: "合成来源四", opensApp: "stays" },
+      ],
+    });
+    const title = (text: string) => ({ ...id("tv_reference_content"), text });
+    const copy = { id: `${MOCK_SYSTEM_SHARE_PACKAGE}:id/copy` };
+    const titles = async () =>
+      (await driver.find(id("tv_reference_content"))).map((view) => view.text);
+    await ask(driver, "合成问题");
+    await driver.tap((await driver.find(id("ll_reference_title")))[0]!);
+    // Android's sheet is in its own package, over the page; its copy closes it.
+    await driver.tap((await driver.find(title("合成来源一")))[0]!);
+    await driver.tap((await driver.find(id("btn_share")))[0]!);
+    expect(await driver.foregroundPackage()).toBe(MOCK_SYSTEM_SHARE_PACKAGE);
+    expect(await driver.find({ id: "android:id/content_preview_text" })).toHaveLength(1);
+    await driver.tap((await driver.find(copy))[0]!);
+    expect(await driver.readClipboard()).toBe("https://example.com/1");
+    expect(await driver.foregroundPackage()).toBe(MOCK_PACKAGE);
+    expect(await driver.find(id("bullet_container"))).toHaveLength(1);
+    // The preview hides the last two rows of the three on screen, for its time only.
+    await driver.back();
+    expect(await titles()).toEqual(["合成来源一"]);
+    clock.advance(5_000);
+    expect(await titles()).toEqual(["合成来源一", "合成来源二", "合成来源三"]);
+    // A sheet that stays after its copy, until the back key.
+    await driver.tap((await driver.find(title("合成来源二")))[0]!);
+    await driver.tap((await driver.find(id("btn_share")))[0]!);
+    await driver.tap((await driver.find(copy))[0]!);
+    expect(await driver.readClipboard()).toBe("https://example.com/2");
+    expect(await driver.foregroundPackage()).toBe(MOCK_SYSTEM_SHARE_PACKAGE);
+    await driver.back();
+    expect(await driver.foregroundPackage()).toBe(MOCK_PACKAGE);
+    await driver.back();
+    clock.advance(5_000);
+    // A source that opens another App; the back key leads to the panel.
+    await driver.tap((await driver.find(title("合成来源三")))[0]!);
+    expect(await driver.foregroundPackage()).toBe(MOCK_FOREIGN_PACKAGE);
+    expect(await driver.find(id("bullet_container"))).toEqual([]);
+    await driver.back();
+    expect(await driver.find(id("bottom_sheet_title"))).toHaveLength(1);
+    // One whose App does not give way.
+    await driver.swipe("up", 1);
+    await driver.tap((await driver.find(title("合成来源四")))[0]!);
+    await driver.back();
+    await driver.back();
+    expect(await driver.foregroundPackage()).toBe(MOCK_FOREIGN_PACKAGE);
+  });
+  it("can keep a source's page open, and show a blocker on it", async () => {
+    const stuck = chat({
+      generationMs: 0,
+      sourcePages: true,
+      pageStuck: true,
+      citations: [{ title: "合成来源一" }],
+    });
+    await ask(stuck.driver, "合成问题");
+    await stuck.driver.tap((await stuck.driver.find(id("ll_reference_title")))[0]!);
+    await stuck.driver.tap((await stuck.driver.find(id("tv_reference_content")))[0]!);
+    await stuck.driver.back();
+    expect(await stuck.driver.find(id("bullet_container"))).toHaveLength(1);
+
+    const blocked = chat({
+      generationMs: 0,
+      sourcePages: true,
+      blocker: { code: "challenge_required", when: "source_page" },
+      citations: [{ title: "合成来源一" }],
+    });
+    await ask(blocked.driver, "合成问题");
+    await blocked.driver.tap((await blocked.driver.find(id("ll_reference_title")))[0]!);
+    expect(await blocked.driver.find(id("mock_verification"))).toEqual([]);
+    await blocked.driver.tap((await blocked.driver.find(id("tv_reference_content")))[0]!);
+    expect(await blocked.driver.find(id("mock_verification"))).toHaveLength(1);
+    expect(await blocked.driver.find(id("bullet_container"))).toEqual([]);
   });
   it("shows an answer with two source entries: the tool steps at its start, the panel's at its end", async () => {
     const options = {

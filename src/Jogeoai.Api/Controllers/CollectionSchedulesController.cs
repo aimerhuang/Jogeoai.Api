@@ -25,12 +25,19 @@ public sealed class CollectionSchedulesController(ICollectionScheduleStore sched
         catch (CollectorStoreException exception) { return StoreError(exception); }
     }
 
-    /// <summary>创建采集计划；未指定 enabled 时保持关闭。App 采集计划的名称为系统保留，使用它返回 400 INVALID_SCHEDULE_NAME。</summary>
+    /// <summary>
+    /// 创建自定义采集计划；未指定 enabled 时保持关闭。计划的每个时隙运行都按每日监控同价预占积分（检测数 × 10），余额不足时该时隙
+    /// 被跳过（CREDIT_INSUFFICIENT），计划保持启用。App 采集计划的名称为系统保留，使用它返回 400 INVALID_SCHEDULE_NAME；
+    /// 每日监控主计划与凌晨计划的名称（含仅大小写、全角或重音不同的写法）返回 409 SCHEDULE_NAME_RESERVED；
+    /// 站点的自定义计划数量达到上限（默认 20）时返回 409 SCHEDULE_LIMIT_REACHED。
+    /// </summary>
     /// <param name="siteId">站点标识。</param>
     /// <param name="request">计划时区、频率和固定采集选择。</param>
     /// <param name="cancellationToken">取消令牌。</param>
     [HttpPost]
     [ProducesResponseType(typeof(CollectionScheduleView), StatusCodes.Status201Created)]
+    [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(StatusCodes.Status409Conflict)]
     public async Task<ActionResult<CollectionScheduleView>> Create(Guid siteId,
         [FromBody] CreateCollectionScheduleRequest request, CancellationToken cancellationToken)
     {
@@ -48,7 +55,8 @@ public sealed class CollectionSchedulesController(ICollectionScheduleStore sched
     /// <summary>
     /// 修改计划配置或启停状态；已领取的时隙仍使用领取时快照。App 采集计划（jogeoai:auto-prompt-monitoring:app:v1）由系统维护，
     /// 只能修改 enabled，修改其他属性返回 400 INVALID_SCHEDULE；品牌已有每日监控计划时它的启停跟随每日监控计划，
-    /// 单独修改返回 409 APP_SCHEDULE_FOLLOWS_MAIN。
+    /// 单独修改返回 409 APP_SCHEDULE_FOLLOWS_MAIN。每日监控主计划与凌晨计划不能改名（409 SCHEDULE_NAME_LOCKED）；
+    /// 自定义计划不能改名为系统保留的计划名称（409 SCHEDULE_NAME_RESERVED，App 采集计划名称为 400 INVALID_SCHEDULE_NAME）。
     /// </summary>
     /// <param name="siteId">站点标识。</param>
     /// <param name="id">计划标识。</param>
@@ -56,7 +64,9 @@ public sealed class CollectionSchedulesController(ICollectionScheduleStore sched
     /// <param name="cancellationToken">取消令牌。</param>
     [HttpPatch("{id:guid}")]
     [ProducesResponseType(typeof(CollectionScheduleView), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status400BadRequest)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
+    [ProducesResponseType(StatusCodes.Status409Conflict)]
     public async Task<ActionResult<CollectionScheduleView>> Update(Guid siteId, Guid id,
         [FromBody] UpdateCollectionScheduleRequest request, CancellationToken cancellationToken)
     {
@@ -101,7 +111,7 @@ public sealed class CollectionSchedulesController(ICollectionScheduleStore sched
 }
 
 /// <summary>创建采集计划的请求。</summary>
-/// <param name="Name">计划名称。</param>
+/// <param name="Name">计划名称；不能使用系统保留的计划名称。</param>
 /// <param name="Cadence">daily 或 weekly。</param>
 /// <param name="DayOfWeek">每周执行日；星期日为 0，星期六为 6。</param>
 /// <param name="LocalTime">当地时刻，格式 HH:mm。</param>
@@ -113,7 +123,7 @@ public sealed record CreateCollectionScheduleRequest(string Name, string Cadence
 
 /// <summary>修改采集计划的请求；null 属性保持原值。</summary>
 /// <param name="ExpectedVersion">当前配置版本，版本不匹配返回 409。</param>
-/// <param name="Name">新的名称。</param>
+/// <param name="Name">新的名称；每日监控主计划与凌晨计划不能改名，自定义计划不能改为系统保留的计划名称。</param>
 /// <param name="Cadence">新的 daily 或 weekly 频率。</param>
 /// <param name="DayOfWeek">新的每周执行日。</param>
 /// <param name="LocalTime">新的当地时刻。</param>

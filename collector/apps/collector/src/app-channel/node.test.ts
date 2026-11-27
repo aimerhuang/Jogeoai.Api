@@ -995,6 +995,9 @@ describe("App collector node (serve)", () => {
       let release!: () => void;
       const started = new Promise<void>((resolve) => (release = resolve));
       const inner = recordingAttempt(store, () => ({}));
+      let seen: AttemptRequest | undefined;
+      let stoppingSeen: boolean | undefined;
+      let abortedSeen: boolean | undefined;
       const running = runNode({
         nodeId: NODE,
         bindings,
@@ -1006,17 +1009,25 @@ describe("App collector node (serve)", () => {
         controlPlane: cp,
         store,
         attempt: async (request) => {
+          seen = request;
           release();
           await new Promise((resolve) => setTimeout(resolve, 50));
+          // Told of the stop at once (task 11-24), while the grace period still runs.
+          stoppingSeen = request.stopping?.aborted;
+          abortedSeen = request.signal.aborted;
           return inner(request);
         },
       });
       await started;
+      expect(seen!.stopping?.aborted).toBe(false);
       stop.abort();
       const leasesAtStop = cp.routes("leases").length;
       await running;
       expect(cp.results).toHaveLength(1);
       expect(cp.routes("leases")).toHaveLength(leasesAtStop);
+      expect(seen!.stopping).toBe(stop.signal);
+      expect(stoppingSeen).toBe(true);
+      expect(abortedSeen).toBe(false);
     } finally {
       await store.close();
     }
@@ -1068,5 +1079,35 @@ describe("mapping to the control plane", () => {
       { nodeId: NODE, taskId: randomUUID(), leaseVersion: 1, revision: "r", now: new Date() },
     );
     expect(long.citations).toEqual([{ title: "标题", site: null, url: null, list: null }]);
+  });
+  // Task 11-24 §12.2: the screen at a stop of the link read is local evidence only.
+  it("submits the same result whether or not the record kept the screen at a stop of its link read", () => {
+    const context = {
+      nodeId: NODE,
+      taskId: randomUUID(),
+      leaseVersion: 2,
+      revision: "r",
+      now: new Date("2026-11-25T08:00:00.000Z"),
+    };
+    const sources = {
+      citations: [
+        {
+          title: "合成来源",
+          site: null,
+          url: "https://example.com/1",
+          link: { copied: "https://example.com/1?theme=light", restored: true },
+        },
+        { title: "合成来源二", site: null, url: null, link: { issue: "not_reached" as const } },
+      ],
+      citationsStatus: "read" as const,
+    };
+    const evidence = { file: "links-stop.png", sha256: "0".repeat(64), bytes: 1 };
+    const without = resultSubmission(recordFixture(sources), context);
+    const kept = resultSubmission(
+      recordFixture({ ...sources, linkStop: { screenshot: evidence, hierarchy: null } }),
+      context,
+    );
+    expect(kept).toEqual(without);
+    expect(JSON.stringify(kept)).not.toContain("links-stop");
   });
 });

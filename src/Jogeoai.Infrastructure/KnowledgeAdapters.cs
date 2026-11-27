@@ -101,13 +101,33 @@ public sealed class LocalObjectStorage : IObjectStorage
 public sealed class BasicDocumentTextExtractor : IDocumentTextExtractor
 {
     private static readonly HashSet<string> Supported = [".pdf", ".docx", ".md", ".markdown", ".txt", ".jpg", ".jpeg", ".png"];
-    private const int MaxCharacters = 10_000_000;
     /// <summary>PDF 文本少于该字数时改用内嵌页图识别。</summary>
     public const int MinimumPdfTextCharacters = 200;
     /// <summary>单次最多提取的页图张数。</summary>
     public const int MaxImages = 20;
     /// <summary>单张图片字节上限。</summary>
     public const int MaxImageBytes = 10 * 1024 * 1024;
+
+    private readonly KnowledgeExtractionLimits limits;
+
+    /// <summary>使用默认解析预算（1000 页、1000 万字符、4000 万像素、90 秒）。</summary>
+    public BasicDocumentTextExtractor() : this(new KnowledgeExtractionLimits()) { }
+
+    /// <summary>使用指定的解析预算；预算超出允许范围时拒绝构造。</summary>
+    /// <param name="limits">页数、字符数、图片像素与墙钟超时上限。</param>
+    public BasicDocumentTextExtractor(KnowledgeExtractionLimits limits)
+    {
+        ArgumentNullException.ThrowIfNull(limits);
+        if (!limits.IsValid())
+            throw new ArgumentOutOfRangeException(nameof(limits), "Knowledge:Extraction 的解析预算超出允许范围。");
+        this.limits = limits;
+    }
+
+    /// <summary>仅供测试：覆盖墙钟超时，用于构造小于 1 秒的超时场景。</summary>
+    internal TimeSpan? ParseTimeoutOverride { get; init; }
+
+    /// <summary>仅供测试：解析 PDF 每一页之前回调页码（从 1 开始），在解析线程上同步执行。</summary>
+    internal Action<int>? BeforePdfPage { get; init; }
 
     /// <inheritdoc />
     public bool CanExtract(string extension, string? contentType) => Supported.Contains(NormalizeExtension(extension));
@@ -122,21 +142,64 @@ public sealed class BasicDocumentTextExtractor : IDocumentTextExtractor
         await CopyWithLimitAsync(content, buffer, 100L * 1024 * 1024, cancellationToken);
         var bytes = buffer.ToArray();
         if (bytes.Length == 0) throw new KnowledgeExtractionException("KNOWLEDGE_EMPTY_CONTENT", "文件内容为空。", false);
-        ExtractedDocument result = extension switch
+        var result = await ParseWithinBudgetAsync(extension, bytes, cancellationToken);
+        if (result.ContentKind != "image" && (result.CharacterCount == 0 || result.Segments.Count == 0))
+            throw new KnowledgeExtractionException("KNOWLEDGE_EMPTY_CONTENT", "文件未解析出正文。", false);
+        if (result.CharacterCount > limits.MaxCharacters)
+            throw new KnowledgeExtractionException("KNOWLEDGE_CONTENT_TOO_LARGE", "文件正文超过安全上限。", false);
+        return result;
+    }
+
+    /// <summary>
+    /// 四种格式的同步解析都放到线程池执行，调用方最多等待墙钟超时。超时或调用方取消后解析令牌被取消，
+    /// 解析在下一页或下一张图片处停止；卡在单页内部的解析无法被强制中止，只是不再有人等待它。
+    /// </summary>
+    private async Task<ExtractedDocument> ParseWithinBudgetAsync(string extension, byte[] bytes, CancellationToken cancellationToken)
+    {
+        using var parseCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        // 先取出令牌：超时后本方法会释放 CancellationTokenSource，而被放弃的解析线程仍要读取它。
+        var parseToken = parseCancellation.Token;
+        var parse = Task.Run(() => Parse(extension, bytes, parseToken), CancellationToken.None);
+        try
+        {
+            return await parse.WaitAsync(ParseTimeoutOverride ?? TimeSpan.FromSeconds(limits.ParseTimeoutSeconds), cancellationToken);
+        }
+        catch (TimeoutException)
+        {
+            parseCancellation.Cancel();
+            ObserveAbandonedParse(parse);
+            // 关机取消与超时同时发生时按取消处理，不能把任务记成超时失败。
+            cancellationToken.ThrowIfCancellationRequested();
+            throw new KnowledgeExtractionException("KNOWLEDGE_PARSE_TIMEOUT", "文件解析超时，请拆分后重新上传。", false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            // 必须显式取消：取消回调按后注册先执行的顺序运行，等待方的回调先完成并让本方法退出，
+            // 退出时释放关联令牌源会把它尚未执行的回调注销，解析令牌就永远不会被取消，被放弃的解析会把剩余页全部解析完。
+            parseCancellation.Cancel();
+            ObserveAbandonedParse(parse);
+            throw;
+        }
+    }
+
+    private ExtractedDocument Parse(string extension, byte[] bytes, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        return extension switch
         {
             ".txt" or ".md" or ".markdown" => ParsePlainText(bytes),
-            ".docx" => ParseDocx(bytes),
-            ".pdf" => ParsePdf(bytes),
+            ".docx" => ParseDocx(bytes, cancellationToken),
+            ".pdf" => ParsePdf(bytes, cancellationToken),
             ".jpg" or ".jpeg" => ParseImage(bytes, "image/jpeg"),
             ".png" => ParseImage(bytes, "image/png"),
             _ => throw new KnowledgeExtractionException("KNOWLEDGE_UNSUPPORTED_FILE_TYPE", "暂不支持该文件格式。", false)
         };
-        if (result.ContentKind != "image" && (result.CharacterCount == 0 || result.Segments.Count == 0))
-            throw new KnowledgeExtractionException("KNOWLEDGE_EMPTY_CONTENT", "文件未解析出正文。", false);
-        if (result.CharacterCount > MaxCharacters)
-            throw new KnowledgeExtractionException("KNOWLEDGE_CONTENT_TOO_LARGE", "文件正文超过安全上限。", false);
-        return result;
     }
+
+    /// <summary>被放弃的解析稍后可能以取消或解析错误结束；读取一次异常，避免成为未观察的任务异常。</summary>
+    private static void ObserveAbandonedParse(Task parse)
+        => _ = parse.ContinueWith(static task => _ = task.Exception, CancellationToken.None,
+            TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
 
     private static ExtractedDocument ParseImage(byte[] bytes, string mediaType)
     {
@@ -168,7 +231,7 @@ public sealed class BasicDocumentTextExtractor : IDocumentTextExtractor
         return new ExtractedDocument(segments, segments.Sum(item => item.Text.Length));
     }
 
-    private static ExtractedDocument ParseDocx(byte[] bytes)
+    private static ExtractedDocument ParseDocx(byte[] bytes, CancellationToken cancellationToken)
     {
         if (bytes.Length < 4 || bytes[0] != (byte)'P' || bytes[1] != (byte)'K')
             throw new KnowledgeExtractionException("KNOWLEDGE_PARSE_FAILED", "DOCX 文件结构无效。", false);
@@ -187,12 +250,14 @@ public sealed class BasicDocumentTextExtractor : IDocumentTextExtractor
                 throw new KnowledgeExtractionException("KNOWLEDGE_PARSE_FAILED", "含宏的 DOCX 暂不支持。", false);
             foreach (var relationship in archive.Entries.Where(item => item.FullName.EndsWith(".rels", StringComparison.OrdinalIgnoreCase)))
             {
+                cancellationToken.ThrowIfCancellationRequested();
                 if (relationship.Length > 1_000_000)
                     throw new KnowledgeExtractionException("KNOWLEDGE_PARSE_FAILED", "DOCX 关系文件超过安全上限。", false);
                 using var relationshipStream = relationship.Open();
                 if (ContainsExternalRelationship(relationshipStream))
                     throw new KnowledgeExtractionException("KNOWLEDGE_PARSE_FAILED", "含外部链接的 DOCX 暂不支持。", false);
             }
+            cancellationToken.ThrowIfCancellationRequested();
             using var input = entry.Open();
             var settings = new XmlReaderSettings { DtdProcessing = DtdProcessing.Prohibit, XmlResolver = null, MaxCharactersInDocument = 20_000_000 };
             using var reader = XmlReader.Create(input, settings);
@@ -203,6 +268,7 @@ public sealed class BasicDocumentTextExtractor : IDocumentTextExtractor
             var paragraphNumber = 0;
             foreach (var paragraph in document.Descendants(wordNamespace + "p"))
             {
+                cancellationToken.ThrowIfCancellationRequested();
                 paragraphNumber++;
                 var text = string.Concat(paragraph.Descendants(wordNamespace + "t").Select(item => item.Value)).Trim();
                 if (text.Length == 0) continue;
@@ -248,7 +314,7 @@ public sealed class BasicDocumentTextExtractor : IDocumentTextExtractor
         return false;
     }
 
-    private static ExtractedDocument ParsePdf(byte[] bytes)
+    private ExtractedDocument ParsePdf(byte[] bytes, CancellationToken cancellationToken)
     {
         var header = Encoding.ASCII.GetString(bytes, 0, Math.Min(bytes.Length, 8));
         if (!header.StartsWith("%PDF-", StringComparison.Ordinal))
@@ -258,49 +324,72 @@ public sealed class BasicDocumentTextExtractor : IDocumentTextExtractor
         try
         {
             using var document = PdfDocument.Open(new MemoryStream(bytes, writable: false), new ParsingOptions());
+            // 页数在解析任何页之前就可得；超过上限直接拒绝，不读取任何页内容。
+            var pageCount = document.NumberOfPages;
+            if (pageCount > limits.MaxPdfPages)
+                throw new KnowledgeExtractionException("KNOWLEDGE_PDF_TOO_MANY_PAGES",
+                    $"PDF 页数超过上限（最多 {limits.MaxPdfPages} 页），请拆分后重新上传。", false);
             var segments = new List<ExtractedTextSegment>();
-            for (var pageNumber = 1; pageNumber <= document.NumberOfPages; pageNumber++)
+            var characterCount = 0L;
+            for (var pageNumber = 1; pageNumber <= pageCount; pageNumber++)
             {
+                cancellationToken.ThrowIfCancellationRequested();
+                BeforePdfPage?.Invoke(pageNumber);
                 var pageText = ContentOrderTextExtractor.GetText(document.GetPage(pageNumber));
                 var lines = pageText.Replace("\r\n", "\n", StringComparison.Ordinal).Replace('\r', '\n').Split('\n');
                 for (var line = 0; line < lines.Length; line++)
                 {
                     var value = lines[line].Trim();
-                    if (value.Length > 0) segments.Add(new ExtractedTextSegment(value, null, $"page:{pageNumber};line:{line + 1}"));
+                    if (value.Length == 0) continue;
+                    segments.Add(new ExtractedTextSegment(value, null, $"page:{pageNumber};line:{line + 1}"));
+                    characterCount += value.Length;
                 }
+                // 逐页累计：一旦超过上限就停止，不再解析后续页。
+                if (characterCount > limits.MaxCharacters)
+                    throw new KnowledgeExtractionException("KNOWLEDGE_CONTENT_TOO_LARGE", "文件正文超过安全上限。", false);
             }
-            var characterCount = segments.Sum(item => item.Text.Length);
-            if (characterCount >= MinimumPdfTextCharacters)
-                return new ExtractedDocument(segments, characterCount, document.NumberOfPages);
+            var totalCharacters = (int)characterCount;
+            if (totalCharacters >= MinimumPdfTextCharacters)
+                return new ExtractedDocument(segments, totalCharacters, pageCount);
             // 无文本层（扫描件）：取前 20 页每页最大的内嵌图作为页图；整页光栅化属后续增强。
-            var (images, truncated) = ExtractPageImages(document);
+            var (images, truncated) = ExtractPageImages(document, cancellationToken);
             if (images.Count == 0)
-                return new ExtractedDocument(segments, characterCount, document.NumberOfPages);
-            return new ExtractedDocument(segments, characterCount, document.NumberOfPages, "image", images,
-                truncated || document.NumberOfPages > MaxImages);
+                return new ExtractedDocument(segments, totalCharacters, pageCount);
+            return new ExtractedDocument(segments, totalCharacters, pageCount, "image", images,
+                truncated || pageCount > MaxImages);
         }
         catch (KnowledgeExtractionException) { throw; }
+        // 取消（超时或调用方取消）必须原样传出，不能被下面的通用分支记成解析失败。
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
         catch (Exception exception) when (exception is not OutOfMemoryException)
         { throw new KnowledgeExtractionException("KNOWLEDGE_PARSE_FAILED", "PDF 文件无法安全解析。", false, exception); }
     }
 
-    private static (IReadOnlyList<ExtractedImage> Images, bool Truncated) ExtractPageImages(PdfDocument document)
+    private (IReadOnlyList<ExtractedImage> Images, bool Truncated) ExtractPageImages(PdfDocument document,
+        CancellationToken cancellationToken)
     {
         var images = new List<ExtractedImage>();
         var truncated = false;
         var pageLimit = Math.Min(document.NumberOfPages, MaxImages);
         for (var pageNumber = 1; pageNumber <= pageLimit; pageNumber++)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             UglyToad.PdfPig.Content.IPdfImage? largest = null;
+            var largestPixels = 0L;
             try
             {
                 foreach (var image in document.GetPage(pageNumber).GetImages())
                 {
+                    cancellationToken.ThrowIfCancellationRequested();
                     if (image.WidthInSamples <= 0 || image.HeightInSamples <= 0) continue;
-                    if (largest is null || (long)image.WidthInSamples * image.HeightInSamples > (long)largest.WidthInSamples * largest.HeightInSamples)
-                        largest = image;
+                    var pixels = (long)image.WidthInSamples * image.HeightInSamples;
+                    // 像素上限只约束需要解码的图片：声明像素超限、又不是可以原样送出的 JPEG 时，不解码、不参与选择，只标记截断。
+                    // 原样送出的 JPEG 不在本进程解码，仍只受 MaxImageBytes 约束（例如 600 dpi 的 A3 扫描页约 7000 万像素）。
+                    if (pixels > limits.MaxImagePixels && !IsRawJpeg(image)) { truncated = true; continue; }
+                    if (largest is null || pixels > largestPixels) { largest = image; largestPixels = pixels; }
                 }
             }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
             catch (Exception exception) when (exception is not OutOfMemoryException)
             {
                 // 单页图片解码失败不影响其余页。
@@ -311,12 +400,16 @@ public sealed class BasicDocumentTextExtractor : IDocumentTextExtractor
             string? mediaType = null;
             try
             {
-                if (largest.TryGetPng(out var png) && png is { Length: > 0 }) { encoded = png; mediaType = "image/png"; }
-                else
+                // 声明像素超限的图片走到这里必然是原始 JPEG：跳过 TryGetPng，保证不发生解码。
+                var decodeAllowed = largestPixels <= limits.MaxImagePixels;
+                if (decodeAllowed && largest.TryGetPng(out var png) && png is { Length: > 0 }) { encoded = png; mediaType = "image/png"; }
+                else if (IsRawJpeg(largest))
                 {
                     var raw = largest.RawMemory;
-                    if (raw.Length >= 3 && raw.Span[0] == 0xFF && raw.Span[1] == 0xD8 && raw.Span[2] == 0xFF)
-                    { encoded = raw.ToArray(); mediaType = "image/jpeg"; }
+                    // 先按字节上限判断再复制，超大的原始 JPEG 不占用额外内存。
+                    if (raw.Length > MaxImageBytes) { truncated = true; continue; }
+                    encoded = raw.ToArray();
+                    mediaType = "image/jpeg";
                 }
             }
             catch (Exception exception) when (exception is not OutOfMemoryException) { encoded = null; }
@@ -325,6 +418,13 @@ public sealed class BasicDocumentTextExtractor : IDocumentTextExtractor
             images.Add(new ExtractedImage(images.Count + 1, mediaType, encoded, $"page:{pageNumber}"));
         }
         return (images, truncated);
+    }
+
+    /// <summary>图片流的原始字节是否以 JPEG 文件头开始：这类图片不解码，原样作为 image/jpeg 送出。</summary>
+    private static bool IsRawJpeg(UglyToad.PdfPig.Content.IPdfImage image)
+    {
+        var raw = image.RawMemory.Span;
+        return raw.Length >= 3 && raw[0] == 0xFF && raw[1] == 0xD8 && raw[2] == 0xFF;
     }
 
     private static bool ContainsAsciiIgnoreCase(ReadOnlySpan<byte> source, ReadOnlySpan<byte> value)

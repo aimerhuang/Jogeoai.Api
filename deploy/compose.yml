@@ -10,6 +10,8 @@ x-dotnet-env: &dotnet-env
   Collector__ChinaServiceToken: ${COLLECTOR_CHINA_SERVICE_TOKEN:-}
   Collector__ChinaTenantIds__0: ${COLLECTOR_CHINA_TENANT_ID_0:-}
   Collector__AppTenantIds__0: ${COLLECTOR_APP_TENANT_ID_0:-}
+  # Further App tenants: one comma-separated list (AppChannelOptions splits an entry on , ; and whitespace).
+  Collector__AppTenantIds__1: ${COLLECTOR_APP_TENANT_IDS:-}
   Email__Host: ${EMAIL_HOST:-smtp.163.com}
   Email__Port: ${EMAIL_PORT:-465}
   Email__Username: ${EMAIL_USERNAME:-}
@@ -55,7 +57,16 @@ services:
     restart: unless-stopped
     environment:
       <<: *dotnet-env
+      # Trusted forwarded headers (API only; the worker has no HTTP entry point, so these stay out of x-dotnet-env).
+      # The host gateway reaches the container through the published port, so the peer the API sees is an
+      # address of this compose network: trust that subnet as the first hop.
+      ForwardedHeaders__KnownNetworks__0: ${JOGEOAI_SUBNET:-172.30.250.0/24}
+      # Second hop for browser traffic: the frontend server's egress IP. Empty = trust the host gateway hop only.
+      ForwardedHeaders__KnownProxies__0: ${FRONTEND_PROXY_IP:-}
+      # Maximum number of X-Forwarded-For entries taken (1-5): frontend server + host gateway = 2.
+      ForwardedHeaders__ForwardLimit: ${FORWARDED_LIMIT:-2}
     # Bound to loopback only: put a TLS gateway (Caddy / Nginx) on the host in front of it.
+    # The gateway must set X-Forwarded-For itself on every request (see docx/deployment.md 2.4).
     ports:
       - "127.0.0.1:${API_PORT:-5260}:8080"
     volumes:
@@ -89,6 +100,15 @@ services:
       context: ../collector
       dockerfile: infra/docker/app.Dockerfile
     command: ["node", "--version"]
+
+networks:
+  # Fixed subnet so the API can name it as the trusted proxy network (ForwardedHeaders__KnownNetworks__0 above).
+  # Docker picks a different subnet on each host otherwise. Change JOGEOAI_SUBNET if it collides with an existing
+  # network; an already created network keeps its old subnet until it is removed (`down`, then `up`).
+  default:
+    ipam:
+      config:
+        - subnet: ${JOGEOAI_SUBNET:-172.30.250.0/24}
 
 volumes:
   mysql_data:

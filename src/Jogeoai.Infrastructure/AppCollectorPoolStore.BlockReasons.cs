@@ -10,7 +10,7 @@ namespace Jogeoai.Infrastructure;
 /// <list type="bullet">
 /// <item>平台被暂停 → platform_paused；</item>
 /// <item>平台的 App 入口停用 → platform_unavailable；</item>
-/// <item>请求领取的绑定已停止，并且该平台此刻没有任何可用的绑定（状态为 active 且 15 分钟内上报或领取过）→ binding_stopped。
+/// <item>请求领取的绑定已停止，并且该平台此刻没有任何可用的绑定（已被运营批准、状态为 active 且 15 分钟内上报或领取过）→ binding_stopped。
 /// 还有别的绑定可用时不写：这些任务等的是容量。</item>
 /// </list>
 /// 一次领取走到“选任务”这一步，说明这个平台此刻没有上述阻塞，之前写下的这三种原因随即清空。
@@ -27,9 +27,12 @@ public sealed partial class AppCollectorPoolStore
 
     private async Task StampBindingStoppedAsync(MySqlConnection c, MySqlTransaction t, string platformCode, CancellationToken ct)
     {
+        // Only a binding the operator approved can work (migration 052; the lease that calls this has already required it):
+        // one that an older build left active and unapproved is not a usable binding.
         var usable = await QuerySingleAsync(c, t, """
             SELECT 1 FROM collector_app_bindings
-            WHERE platform_code = @platform AND status = 'active' AND last_seen_at > UTC_TIMESTAMP(6) - INTERVAL @offline MINUTE LIMIT 1;
+            WHERE platform_code = @platform AND status = 'active' AND approved_at IS NOT NULL
+              AND last_seen_at > UTC_TIMESTAMP(6) - INTERVAL @offline MINUTE LIMIT 1;
             """, ct, ("@platform", platformCode), ("@offline", AppPoolRules.BindingOfflineMinutes));
         if (usable is null) await StampWaitingTasksAsync(c, t, platformCode, AppTaskBlockReasons.BindingStopped, ct);
     }

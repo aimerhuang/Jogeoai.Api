@@ -1,9 +1,11 @@
+using System.Data;
 using System.Globalization;
 using System.Net;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using Jogeoai.Application;
 using Jogeoai.Domain;
+using Microsoft.Extensions.Options;
 using MySqlConnector;
 
 namespace Jogeoai.Infrastructure;
@@ -11,9 +13,35 @@ namespace Jogeoai.Infrastructure;
 /// <summary>品牌研究任务及全局研究 Provider 的 MySQL 实现。</summary>
 /// <param name="database">MySQL 连接工厂。</param>
 /// <param name="knowledgeItems">品牌知识条目存储；提供时入队会把条目冻结为 knowledge: 证据，未提供时不读取条目。</param>
-public sealed class ResearchStore(MySqlDatabase database, IBrandKnowledgeItemStore? knowledgeItems = null) : IResearchStore
+/// <param name="quota">入队额度（<c>Research:Quota</c>）；未提供时使用默认值（每站点 1 个进行中任务、每租户滚动 24 小时 20 次）。</param>
+public sealed class ResearchStore(MySqlDatabase database, IBrandKnowledgeItemStore? knowledgeItems = null,
+    IOptions<ResearchQuotaOptions>? quota = null) : IResearchStore
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web) { Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping };
+    private static readonly ResearchQuotaOptions DefaultQuota = new();
+
+    /// <summary>
+    /// 入队事务的隔离级别：READ COMMITTED。事务内每条普通读都使用语句开始时的最新已提交数据，
+    /// 所以“取得站点行锁之后再读进行中任务”一定能看到上一个持锁请求已提交的任务，不依赖读视图在事务里何时建立。
+    /// 不要改回默认的 REPEATABLE READ：那样只有在“站点行的锁定读是事务第一条语句、之前没有任何普通读”时才成立。
+    /// </summary>
+    internal const IsolationLevel EnqueueIsolation = IsolationLevel.ReadCommitted;
+
+    /// <summary>
+    /// Worker 领取语句：可领取的任务按“最近最少被服务的租户优先”排序，只锁定候选任务行并跳过已被其他 Worker 锁住的行。
+    /// 租户的排序值是它最近一次被服务的时间（该租户任务 started_at 的最大值）；从未被服务过的租户没有这个时间，用任务自己的创建时间代替，
+    /// 所以新租户排在“上次服务早于它入队时间”的租户之后，而不是排在所有人之前（否则每注册一个新租户就能插队一次）。
+    /// </summary>
+    internal const string ClaimSql = """
+        SELECT BIN_TO_UUID(j.id), BIN_TO_UUID(j.tenant_id), BIN_TO_UUID(j.site_id), BIN_TO_UUID(j.user_id),
+               j.request_json, j.attempt_count, j.result_json
+        FROM brand_research_jobs j
+        WHERE (j.status = 'pending' AND j.next_attempt_at <= UTC_TIMESTAMP(6))
+           OR (j.status = 'running' AND j.lease_until < UTC_TIMESTAMP(6))
+        ORDER BY COALESCE((SELECT MAX(s.started_at) FROM brand_research_jobs s WHERE s.tenant_id = j.tenant_id), j.created_at),
+                 j.created_at, j.id
+        LIMIT 1 FOR UPDATE OF j SKIP LOCKED;
+        """;
 
     public async Task<BrandResearchAccepted> EnqueueAsync(Guid tenantId, Guid siteId, Guid userId,
         StartBrandResearchRequest request, CancellationToken cancellationToken = default)
@@ -24,7 +52,7 @@ public sealed class ResearchStore(MySqlDatabase database, IBrandKnowledgeItemSto
         var normalized = Normalize(request, knowledgeEvidence.Count > 0);
         await using var connection = database.CreateConnection();
         await connection.OpenAsync(cancellationToken);
-        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+        await using var transaction = await connection.BeginTransactionAsync(EnqueueIsolation, cancellationToken);
         var site = await Row(connection, transaction,
             "SELECT host, display_name FROM sites WHERE tenant_id = UUID_TO_BIN(@tenant) AND id = UUID_TO_BIN(@site) AND status = 'active' FOR UPDATE;",
             cancellationToken, ("@tenant", tenantId.ToString()), ("@site", siteId.ToString()));
@@ -47,6 +75,28 @@ public sealed class ResearchStore(MySqlDatabase database, IBrandKnowledgeItemSto
             await transaction.CommitAsync(cancellationToken);
             return new BrandResearchAccepted(Guid.Parse(existing[0]), ParseStatus(existing[2]), Utc(existing[3]));
         }
+
+        // 入队额度：排在幂等重放之后（重放不计入、也不会被拦截）、插入之前，与插入同一事务并持有上面的站点行锁。
+        // 两条都是普通（不加锁）读，不给 brand_research_jobs 加任何锁，所以不会与 Worker 领取或租约更新互相等待，
+        // 也不会像 REPEATABLE READ 下的锁定读那样在 ix_brand_research_jobs_site_created 上留下间隙锁。
+        // 事务是 READ COMMITTED（见 EnqueueIsolation）：每条语句读到的都是语句开始时已提交的数据。
+        // 同一站点的并发请求在站点行锁上排队，前一个请求先提交再释放锁，后到的请求取得锁之后执行的这条读一定能看到它的任务，只会有一个通过。
+        var limits = quota?.Value ?? DefaultQuota;
+        var active = await Rows(connection, transaction, """
+            SELECT BIN_TO_UUID(id) FROM brand_research_jobs
+            WHERE tenant_id = UUID_TO_BIN(@tenant) AND site_id = UUID_TO_BIN(@site) AND status IN ('pending','running')
+            ORDER BY created_at DESC, id DESC
+            LIMIT @limit;
+            """, cancellationToken, ("@tenant", tenantId.ToString()), ("@site", siteId.ToString()), ("@limit", limits.MaxActivePerSite));
+        if (active.Count >= limits.MaxActivePerSite) throw new ResearchAlreadyActiveException(Guid.Parse(active[0][0]));
+        // 滚动 24 小时而不是自然日；已取消和失败的任务同样计入（可能已经消耗了 Provider 调用）。
+        // 不加租户级锁：同一租户不同站点的并发请求各持各的站点行锁，极端情况下会略微超过上限（最多“并发站点数 − 1”次）。
+        var recent = await Row(connection, transaction, """
+            SELECT COUNT(*) FROM brand_research_jobs
+            WHERE tenant_id = UUID_TO_BIN(@tenant) AND created_at > UTC_TIMESTAMP(6) - INTERVAL 24 HOUR;
+            """, cancellationToken, ("@tenant", tenantId.ToString()));
+        if (long.Parse(recent![0], CultureInfo.InvariantCulture) >= limits.DailyPerTenant)
+            throw new CollectorStoreException("RESEARCH_DAILY_LIMIT", "今天的品牌研究次数已用完，请明天再试。", 429);
 
         StoredResult? previous = null;
         if (normalized.ReuseJobId is { } previousId)
@@ -107,15 +157,12 @@ public sealed class ResearchStore(MySqlDatabase database, IBrandKnowledgeItemSto
         await using var connection = database.CreateConnection();
         await connection.OpenAsync(cancellationToken);
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
-        var row = await Row(connection, transaction, """
-            SELECT BIN_TO_UUID(id), BIN_TO_UUID(tenant_id), BIN_TO_UUID(site_id), BIN_TO_UUID(user_id),
-                   request_json, attempt_count, result_json
-            FROM brand_research_jobs
-            WHERE (status = 'pending' AND next_attempt_at <= UTC_TIMESTAMP(6))
-               OR (status = 'running' AND lease_until < UTC_TIMESTAMP(6))
-            ORDER BY created_at, id
-            LIMIT 1 FOR UPDATE SKIP LOCKED;
-            """, cancellationToken);
+        // 租户间公平：最近最少被服务的租户优先，按租户最近一次开始时间升序；从未被领取过的租户（MAX(started_at) 为 NULL）
+        // 以任务自己的 created_at 参与排序，不享有优先。同一租户内仍按创建顺序。
+        // started_at 与 created_at 都是数据库的 UTC_TIMESTAMP(6)，可以直接比较；started_at 由下面的 UPDATE 在任务首次被领取时写入，
+        // 重试或租约过期后的再次领取不刷新它（一个任务最多 3 次尝试，期间该租户的排序值不后移）。
+        // 子查询属于嵌套查询块，外层的锁定子句不作用于它（普通快照读）；FOR UPDATE OF j 只锁被扫描的候选任务行。
+        var row = await Row(connection, transaction, ClaimSql, cancellationToken);
         if (row is null)
         {
             await transaction.CommitAsync(cancellationToken);

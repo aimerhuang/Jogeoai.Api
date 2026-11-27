@@ -176,6 +176,9 @@ docker compose exec -T -e MYSQL_PWD="$MYSQL_ROOT_PASSWORD" mysql mysql -uroot --
 5. **准备任务**
    - 准备 4–6 条 Prompt，必须是该项目已审批的问题，与 Collector 的 approved question file 对应。
    - 用 `POST /api/v1/visibility-runs` 创建 doubao 运行（`platforms`，`sampleCount=1`），记下 Run ID。
+     - Development 环境（本机，带 `X-Tenant-Id`）照旧可以直接发起。非 Development 环境只有系统管理员能用 `platforms` 形态，其他人返回 403 `ADMIN_REQUIRED`（Trellis `11-27-sec-manual-run-charging`；本机 5260 已于 2026-11-27 用该构建重启，本机是 Development，这条限制不生效，403 没有运行态验证；其他环境未部署）。
+     - 每次最多 200 个 Prompt、20 个平台入口，超出返回 400 `INVALID_RUN`。这条通道不扣积分。
+     - 运行的 `requested_by` 由服务端写入（Development 兼容桥为 `dev-bridge`，登录用户为 `user:{userId}`），请求里的 `requestedBy` 不再存储；按 `requested_by` 查找自己发起的运行的脚本需要改用 Run ID 或幂等键。
 6. **记录基线**：`GET session-profiles` 两个账号都为 `active`、计数为 0；`GET platform-dispatch-states` 中 `pausedAt` 为 null。
 
 ### B. Collector（`Ai-visiblility-collector`，按其 `docs/runbooks/account-pool.md`）

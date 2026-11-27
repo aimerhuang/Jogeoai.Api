@@ -15,7 +15,7 @@ public sealed class AppChannelMySqlFactAttribute : FactAttribute
     public AppChannelMySqlFactAttribute()
     {
         if (string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable(ConnectionVariable)))
-            Skip = "需提供已执行 001–048 迁移、库名含 _test 的独立测试库 JOGEOAI_APP_CHANNEL_TEST_CONNECTION；不能使用业务库 jogeoai。";
+            Skip = "需提供已执行 001–052 迁移、库名含 _test 的独立测试库 JOGEOAI_APP_CHANNEL_TEST_CONNECTION（迁移用例会在库上回滚并重放 049 与 052）；不能使用业务库 jogeoai。";
     }
 }
 
@@ -28,13 +28,18 @@ public sealed class AppChannelSqlCollection
 
 /// <summary>
 /// 迁移 049（App 采集渠道）与它的回滚脚本。隔离库用例在库上真实执行两个脚本：可重复执行、回滚后与 048 的结构一致、
-/// 回滚的四种拒绝条件、现有数据不变、种子与放开后的 CHECK。每个用例结束时删除自己的夹具并把库恢复到「049 已执行」。
+/// 回滚的四种拒绝条件、现有数据不变、种子与放开后的 CHECK。
+/// 另有迁移 052（绑定审批与节点设备上限）与它的回滚：回填、可重放（重放不会批准待批准的绑定）、拒绝条件、回滚后结构复原。
+/// 049 的回滚会删掉节点表和绑定表，所以每个用例结束时把库恢复到「049 与 052 都已执行」（<c>ApplyAsync</c> 两个都执行），
+/// 同一集合里其他 App 用例才能继续运行；050 只改列默认值，这里不重放。
 /// </summary>
 [Collection(AppChannelSqlCollection.Name)]
 public sealed class AppChannelMigrationTests
 {
     private const string Migration = "049_app_channel.sql";
     private const string Rollback = "rollback/049_app_channel_rollback.sql";
+    private const string ApprovalMigration = "052_app_binding_approval.sql";
+    private const string ApprovalRollback = "rollback/052_app_binding_approval_rollback.sql";
     private const string AffectedTables = "'visibility_checks','collector_platform_entries','collector_tasks','collector_attempts'";
     private static readonly string[] NewTables =
     [
@@ -147,6 +152,8 @@ public sealed class AppChannelMigrationTests
             Assert.Equal(statesOnce, await db.TextAsync("SELECT CONCAT_WS('|', platform_code, created_at, updated_at) FROM collector_app_platform_states ORDER BY platform_code;"));
             Assert.True(await db.ProbeAsync());
             await db.RequireAsync();
+            // ApplyAsync also runs 052 on the tables 049 just created, under the same application account.
+            Assert.True(await db.ProbeApprovalAsync());
 
             // Existing rows: platforms, consumer_web entries and site targets are byte-for-byte what they were before 049.
             Assert.Equal(platforms, await db.PlatformsAsync());
@@ -451,11 +458,14 @@ public sealed class AppChannelMigrationTests
             Task<int> BindAsync(string onNode, string device, string platform, string account) => db.ExecAsync(addBinding,
                 ("@node", onNode), ("@device", device), ("@platform", platform), ("@label", account));
             Assert.Equal(1, await BindAsync(node, "AVD_A", "doubao", label));
-            Assert.Equal("active|-|-|-|300|-", await db.TextAsync("""
+            // The interval default is 300 right after 049 and 100 once 050 has run. Which one this database carries depends on
+            // whether a rollback-and-replay case (which replays 049 but not 050) ran before this case, so both are accepted;
+            // asserting 300 alone made this case fail on a freshly migrated database whenever it ran first.
+            Assert.Contains(await db.TextAsync("""
                 SELECT CONCAT_WS('|', status, IFNULL(stop_reason, '-'), IFNULL(stopped_at, '-'), IFNULL(cooldown_until, '-'),
                     min_interval_seconds, IFNULL(daily_quota, '-'))
                 FROM collector_app_bindings WHERE node_id = @node;
-                """, ("@node", node)));
+                """, ("@node", node)), new[] { "active|-|-|-|300|-", "active|-|-|-|100|-" });
             Assert.Equal(0, await db.CountAsync("""
                 SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = DATABASE()
                    AND table_name = 'collector_app_bindings' AND column_name LIKE '%hourly%';
@@ -559,6 +569,134 @@ public sealed class AppChannelMigrationTests
         }
     }
 
+    // Migration 052 on a database that already has nodes and bindings: every existing binding is approved as of its
+    // registration and keeps its state, every node's cap covers the devices it has, the CHECK holds, a replay changes
+    // nothing (in particular it does not approve a binding that is waiting for approval), a node with more than 64 devices
+    // is refused before anything changes, and the rollback restores the schema and keeps every row.
+    [AppChannelMySqlFact]
+    public async Task Migration052ApprovesExistingBindingsSizesEachNodesCapIsReplayableAndRollsBack()
+    {
+        var db = IsolatedDb.Open();
+        var nodes = Enumerable.Range(0, 4).Select(_ => $"test-node-{Guid.NewGuid():N}").ToArray();
+        var suffix = Guid.NewGuid().ToString("N");
+        (string Name, object? Value)[] mine = [("@a", nodes[0]), ("@b", nodes[1]), ("@c", nodes[2]), ("@d", nodes[3])];
+        const string addNode = """
+            INSERT INTO collector_app_nodes (node_id, token_hash, created_at, updated_at)
+            VALUES (@node, @hash, UTC_TIMESTAMP(6), UTC_TIMESTAMP(6));
+            """;
+        // Rows as a build before 052 writes them: the statement names neither approved_at nor max_devices.
+        const string addBinding = """
+            INSERT INTO collector_app_bindings (id, node_id, device_id, platform_code, account_label, app_package, status, stop_reason,
+                stopped_at, created_at, updated_at)
+            VALUES (UUID_TO_BIN(UUID()), @node, @device, @platform, @label, 'com.example.synthetic', @status, @reason,
+                CASE WHEN @reason IS NULL THEN NULL ELSE UTC_TIMESTAMP(6) END, UTC_TIMESTAMP(6) - INTERVAL @age MINUTE, UTC_TIMESTAMP(6));
+            """;
+        Task<int> BindAsync(string node, string device, string platform, string? reason = null, int age = 10) => db.ExecAsync(addBinding,
+            ("@node", node), ("@device", device), ("@platform", platform), ("@label", $"{platform}-{device}-{suffix}"),
+            ("@status", reason is null ? "active" : "stopped"), ("@reason", reason), ("@age", age));
+        const string states = """
+            SELECT CONCAT_WS('|', node_id, device_id, platform_code, status, IFNULL(stop_reason, '-'), created_at)
+            FROM collector_app_bindings WHERE node_id IN (@a, @b, @c, @d) ORDER BY node_id, device_id, platform_code;
+            """;
+        Task<string> CapAsync(string node) => db.TextAsync("SELECT max_devices FROM collector_app_nodes WHERE node_id = @node;", ("@node", node));
+        Task<long> UnapprovedAsync() => db.CountAsync("SELECT COUNT(*) FROM collector_app_bindings WHERE approved_at IS NULL;");
+        Task<string> ColumnAsync(string table, string column) => db.TextAsync("""
+            SELECT CONCAT_WS('|', column_type, is_nullable, IFNULL(column_default, '<null>')) FROM information_schema.columns
+            WHERE table_schema = DATABASE() AND table_name = @table AND column_name = @column;
+            """, ("@table", table), ("@column", column));
+        try
+        {
+            await db.ApplyAsync();
+            var user = Assert.Single(await db.LinesAsync("SELECT CURRENT_USER();"));
+            Assert.False(user.StartsWith("root@", StringComparison.OrdinalIgnoreCase), "052 预期可以用应用账号执行，不能用 root 来验证这一点。");
+
+            // Back to the schema before 052, with the rows an older build left: a node with six devices (one of them with two
+            // Apps; one binding waiting for a login, one disabled by the operator), a node with one device, a node with none.
+            await db.RollbackApprovalAsync();
+            Assert.False(await db.ProbeApprovalAsync());
+            Assert.Equal(("", ""), (await ColumnAsync("collector_app_bindings", "approved_at"), await ColumnAsync("collector_app_nodes", "max_devices")));
+            var before = await db.SchemaAsync();
+            foreach (var node in nodes.Take(3)) await db.ExecAsync(addNode, ("@node", node), ("@hash", Sha256(node)));
+            for (var i = 1; i <= 6; i++)
+                await BindAsync(nodes[0], $"AVD_{i}", "doubao", i switch { 2 => "login_required", 3 => "disabled_by_operator", _ => null }, age: i * 10);
+            await BindAsync(nodes[0], "AVD_1", "kimi");
+            await BindAsync(nodes[1], "AVD_1", "qwen");
+            var rows = await db.TextAsync(states, mine);
+            Assert.Equal(8, rows.Split('\n').Length);
+            var counts = await db.RowCountsAsync();
+
+            await db.ApplyApprovalAsync();
+            Assert.True(await db.ProbeApprovalAsync());
+            // Every existing binding keeps its state and is approved as of its registration.
+            Assert.Equal(rows, await db.TextAsync(states, mine));
+            Assert.Equal(8, await db.CountAsync(
+                "SELECT COUNT(*) FROM collector_app_bindings WHERE node_id IN (@a, @b, @c, @d) AND approved_at = created_at;", mine));
+            Assert.Equal(0, await UnapprovedAsync());
+            // Each node's cap covers what it has registered: six devices (not seven bindings), and the default of four otherwise.
+            Assert.Equal(("6", "4", "4"), (await CapAsync(nodes[0]), await CapAsync(nodes[1]), await CapAsync(nodes[2])));
+            Assert.Equal(counts, await db.RowCountsAsync());
+            Assert.Equal("datetime(6)|YES|<null>", await ColumnAsync("collector_app_bindings", "approved_at"));
+            Assert.Equal("int unsigned|NO|4", await ColumnAsync("collector_app_nodes", "max_devices"));
+            // No new stop-reason value: the CHECK of 049 is what it was.
+            Assert.Equal(1, await db.CountAsync("""
+                SELECT COUNT(*) FROM information_schema.check_constraints WHERE constraint_schema = DATABASE()
+                   AND constraint_name = 'ck_collector_app_bindings_stop_reason' AND check_clause LIKE '%disabled_by_operator%'
+                   AND check_clause NOT LIKE '%pending%';
+                """));
+            foreach (var bad in new[] { 0, 65 })
+                await AssertRejectedAsync(3819, "ck_collector_app_nodes_max_devices", () => db.ExecAsync(
+                    "UPDATE collector_app_nodes SET max_devices = @max WHERE node_id = @node;", ("@max", bad), ("@node", nodes[2])));
+            foreach (var good in new[] { 1, 64, 4 })
+                Assert.Equal(1, await db.ExecAsync("UPDATE collector_app_nodes SET max_devices = @max WHERE node_id = @node;",
+                    ("@max", good), ("@node", nodes[2])));
+            var applied = await db.SchemaAsync();
+            Assert.NotEqual(before, applied);
+            Assert.DoesNotContain("jogeoai_052", applied, StringComparison.Ordinal);
+
+            // A replay after release: the cap an operator set and a binding that is waiting for approval are left alone.
+            Assert.Equal(1, await db.ExecAsync("UPDATE collector_app_nodes SET max_devices = 9 WHERE node_id = @node;", ("@node", nodes[1])));
+            await BindAsync(nodes[1], "AVD_2", "qwen", "disabled_by_operator");
+            Assert.Equal(1, await UnapprovedAsync());
+            await db.ApplyApprovalAsync();
+            Assert.Equal(applied, await db.SchemaAsync());
+            Assert.Equal(1, await db.CountAsync(
+                "SELECT COUNT(*) FROM collector_app_bindings WHERE node_id = @node AND device_id = 'AVD_2' AND approved_at IS NULL;", ("@node", nodes[1])));
+            Assert.Equal(("6", "9", "4"), (await CapAsync(nodes[0]), await CapAsync(nodes[1]), await CapAsync(nodes[2])));
+
+            // Rollback: the two columns and the CHECK go, every row stays as it is; replaying it is a no-op.
+            var kept = await db.TextAsync(states, mine);
+            await db.RollbackApprovalAsync();
+            Assert.False(await db.ProbeApprovalAsync());
+            Assert.Equal(before, await db.SchemaAsync());
+            Assert.Equal(kept, await db.TextAsync(states, mine));
+            await db.RollbackApprovalAsync();
+            Assert.Equal(before, await db.SchemaAsync());
+
+            // Refusal: a node with 65 devices cannot get a cap that satisfies the CHECK. Nothing is changed.
+            await db.ExecAsync(addNode, ("@node", nodes[3]), ("@hash", Sha256(nodes[3])));
+            for (var i = 1; i <= 65; i++) await BindAsync(nodes[3], $"BULK_{i:000}", "deepseek");
+            var refused = await Assert.ThrowsAsync<MySqlException>(db.ApplyApprovalAsync);
+            Assert.Equal("45000", refused.SqlState);
+            Assert.Contains("052 refused: a node has more than 64 registered devices", refused.Message, StringComparison.Ordinal);
+            Assert.Equal(before, await db.SchemaAsync());
+            Assert.Equal(1, await db.ExecAsync("DELETE FROM collector_app_bindings WHERE node_id = @node AND device_id = 'BULK_065';", ("@node", nodes[3])));
+            await db.ApplyApprovalAsync();
+            Assert.Equal(applied, await db.SchemaAsync());
+            Assert.Equal("64", await CapAsync(nodes[3]));
+            // Applied again after a rollback, 052 approves every binding that exists then, including the one that was
+            // waiting before the rollback: the rollback script says so, and asks for those bindings to be dealt with first.
+            Assert.Equal(0, await UnapprovedAsync());
+        }
+        finally
+        {
+            await db.ApplyAsync();
+            await db.ExecAsync("""
+                DELETE FROM collector_app_bindings WHERE node_id IN (@a, @b, @c, @d);
+                DELETE FROM collector_app_nodes WHERE node_id IN (@a, @b, @c, @d);
+                """, mine);
+        }
+    }
+
     private static string Sha256(string text) => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(text))).ToLowerInvariant();
 
     private static async Task<MySqlException> AssertRejectedAsync(int number, string constraint, Func<Task> action)
@@ -587,9 +725,27 @@ public sealed class AppChannelMigrationTests
             return new IsolatedDb(value!);
         }
 
-        internal Task ApplyAsync() => RunFileAsync(Migration);
+        /// <summary>049 and then 052: the state every other App SQL case needs. Both are replayable.</summary>
+        internal async Task ApplyAsync()
+        {
+            await RunFileAsync(Migration);
+            await RunFileAsync(ApprovalMigration);
+        }
 
+        /// <summary>The 049 rollback; it drops the node and binding tables together with the columns 052 added to them.</summary>
         internal Task RollbackAsync() => RunFileAsync(Rollback);
+
+        internal Task ApplyApprovalAsync() => RunFileAsync(ApprovalMigration);
+
+        internal Task RollbackApprovalAsync() => RunFileAsync(ApprovalRollback);
+
+        /// <summary>The uncached probe for 052 (both columns and the CHECK that marks its completion).</summary>
+        internal async Task<bool> ProbeApprovalAsync()
+        {
+            await using var connection = new MySqlConnection(connectionString);
+            await connection.OpenAsync();
+            return await AppChannelSchema.ProbeBindingApprovalAsync(connection, null, CancellationToken.None);
+        }
 
         /// <summary>按 mysql 客户端的方式逐条执行迁移文件（识别 DELIMITER）；失败时清掉脚本留下的辅助存储过程。</summary>
         private async Task RunFileAsync(string relative)
@@ -620,7 +776,7 @@ public sealed class AppChannelMigrationTests
                 // A refused run stops at CALL, exactly like the mysql client, and leaves the helper procedure behind.
                 foreach (var routine in await LinesAsync("""
                     SELECT routine_name FROM information_schema.routines
-                    WHERE routine_schema = DATABASE() AND routine_name LIKE 'jogeoai\_049\_%';
+                    WHERE routine_schema = DATABASE() AND (routine_name LIKE 'jogeoai\_049\_%' OR routine_name LIKE 'jogeoai\_052\_%');
                     """))
                     await ExecAsync($"DROP PROCEDURE IF EXISTS `{routine}`;");
             }

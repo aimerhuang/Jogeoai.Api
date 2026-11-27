@@ -24,7 +24,7 @@ public sealed record CloroVisibilityTarget(string Provider, string Engine, strin
 /// <param name="PreviewId">可选固定预览标识。</param>
 /// <param name="RequireEnabledTargets">是否仅允许站点当前启用的 Target。</param>
 /// <param name="HttpRequestHash">HTTP 规范化请求的身份摘要；计划运行为空。</param>
-/// <param name="ChargeMonitoringCredits">是否按 Prompt 每日监控规则预留和结算积分；手动采集默认不计费。</param>
+/// <param name="ChargeMonitoringCredits">是否按 Prompt 每日监控规则预留和结算积分。默认值为 false 只是为了不改变既有调用方；凡是会产生真实 Provider 调用的入口（手动采集、所有采集计划的时隙、首轮与立即采集）都必须显式传 true。</param>
 /// <param name="PromptTargetKeys">每日监控中自定义平台范围提问的有效目标键，必须是 Targets 的子集；为空表示全部 Prompt × 全部 Target。手动采集不使用。</param>
 public sealed record CreateCloroVisibilityRunCommand(Guid TenantId, Guid SiteId, IReadOnlyList<Guid> PromptIds,
     IReadOnlyList<CloroVisibilityTarget> Targets, string IdempotencyKey, string? RequestedBy = null,

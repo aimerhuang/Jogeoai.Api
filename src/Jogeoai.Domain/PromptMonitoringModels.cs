@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json.Serialization;
@@ -186,9 +187,54 @@ public static class PromptMonitoringIdentity
         _ => null,
     };
 
-    /// <summary>是否为自动监控计划（主计划或凌晨计划）：按自动选择重算时隙、收取监控积分。</summary>
+    /// <summary>
+    /// 是否为自动监控计划（主计划或凌晨计划）：按自动选择重算时隙、按提问的平台范围展开。是否预占积分与计划名称无关，
+    /// 所有计划的时隙运行都预占。
+    /// </summary>
     /// <param name="scheduleName">计划名称。</param>
     public static bool IsAutomaticSchedule(string? scheduleName) => SlotKind(scheduleName) is not null;
+
+    /// <summary>
+    /// 名称是否与系统保留的计划名称（每日监控主计划、凌晨计划、App 采集计划）冲突。除完全相同外，仅大小写、全角 / 半角、
+    /// 重音符号、数字写法或不可见字符不同的写法也算冲突：计划名称列使用不区分大小写与重音的排序规则，这些写法在按名称查询计划时
+    /// 与保留名称相等。只用于拒绝自定义计划使用这些名称；判断一个计划是否由系统维护仍用
+    /// <see cref="IsAutomaticSchedule"/> 与 <see cref="IsAppSchedule"/> 的精确比较。
+    /// 本方法是不访问数据库的近似判断，可能漏掉排序规则视为相等的个别写法（例如没有 Unicode 分解的带删除线字母）；
+    /// 计划存储在写入后还会让数据库按名称列自身的排序规则再比较一次，以那次比较为准。
+    /// </summary>
+    /// <param name="scheduleName">计划名称。</param>
+    public static bool IsReservedScheduleName(string? scheduleName)
+    {
+        if (string.IsNullOrEmpty(scheduleName)) return false;
+        string folded;
+        try { folded = FoldScheduleName(scheduleName); }
+        // Not valid Unicode (a lone surrogate): it cannot equal an ASCII reserved name.
+        catch (ArgumentException) { return false; }
+        return folded is ScheduleName or NightScheduleName or AppScheduleName;
+    }
+
+    // Compatibility decomposition (full-width and styled letters), then drop combining marks and invisible characters,
+    // fold every decimal digit to ASCII and lower-case the rest. The reserved names are lower-case ASCII.
+    private static string FoldScheduleName(string value)
+    {
+        var builder = new StringBuilder(value.Length);
+        foreach (var rune in value.Normalize(NormalizationForm.FormKD).EnumerateRunes())
+        {
+            switch (Rune.GetUnicodeCategory(rune))
+            {
+                case UnicodeCategory.NonSpacingMark or UnicodeCategory.SpacingCombiningMark or UnicodeCategory.EnclosingMark
+                    or UnicodeCategory.Format or UnicodeCategory.Control:
+                    continue;
+                case UnicodeCategory.DecimalDigitNumber:
+                    builder.Append((char)('0' + (int)Rune.GetNumericValue(rune)));
+                    continue;
+                default:
+                    builder.Append(Rune.ToLowerInvariant(rune).ToString());
+                    continue;
+            }
+        }
+        return builder.ToString();
+    }
 
     /// <summary>问题版本、采集目标或品牌分析配置变化后创建新的首轮运行。</summary>
     public static string InitialRunKey(Guid siteId, uint subjectConfigVersion,

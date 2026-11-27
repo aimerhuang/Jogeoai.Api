@@ -4,11 +4,15 @@ using System.Net.Http.Json;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using Jogeoai.Application;
 using Jogeoai.Domain;
 using Jogeoai.Infrastructure;
 using Jogeoai.Api.Controllers;
+using Jogeoai.Worker;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Options;
 
 namespace Jogeoai.Tests;
 
@@ -211,6 +215,230 @@ public sealed class KnowledgeAdapterTests
     }
 
     [Fact]
+    public void ExtractionLimitsDefaultToTheDesignedBudgetsAndRejectOutOfRangeValues()
+    {
+        var defaults = new KnowledgeExtractionLimits();
+        Assert.Equal(1000, defaults.MaxPdfPages);
+        Assert.Equal(10_000_000, defaults.MaxCharacters);
+        Assert.Equal(40_000_000, defaults.MaxImagePixels);
+        Assert.Equal(90, defaults.ParseTimeoutSeconds);
+        Assert.True(defaults.IsValid());
+
+        foreach (var invalid in new[]
+        {
+            new KnowledgeExtractionLimits { MaxPdfPages = 0 },
+            new KnowledgeExtractionLimits { MaxCharacters = 0 },
+            new KnowledgeExtractionLimits { MaxImagePixels = 0 },
+            new KnowledgeExtractionLimits { ParseTimeoutSeconds = 0 },
+            new KnowledgeExtractionLimits { ParseTimeoutSeconds = 3601 }
+        })
+        {
+            Assert.False(invalid.IsValid());
+            Assert.Throws<ArgumentOutOfRangeException>(() => new BasicDocumentTextExtractor(invalid));
+        }
+    }
+
+    [Fact]
+    public async Task KnowledgeServicesBindExtractionLimitsFromConfigurationAndRejectInvalidValues()
+    {
+        var configuration = new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
+        {
+            ["Knowledge:Extraction:MaxPdfPages"] = "2",
+            ["Knowledge:Extraction:ParseTimeoutSeconds"] = "30"
+        }).Build();
+        await using var provider = new ServiceCollection().AddKnowledgeServices(configuration).BuildServiceProvider();
+
+        var limits = provider.GetRequiredService<IOptions<KnowledgeExtractionLimits>>().Value;
+        Assert.Equal(2, limits.MaxPdfPages);
+        Assert.Equal(30, limits.ParseTimeoutSeconds);
+        Assert.Equal(10_000_000, limits.MaxCharacters);
+        Assert.Equal(40_000_000, limits.MaxImagePixels);
+
+        // 注入的解析器使用绑定后的上限，而不是默认值。
+        var extractor = provider.GetRequiredService<IDocumentTextExtractor>();
+        await using var stream = new MemoryStream(BuildTextPdf(3));
+        var exception = await Assert.ThrowsAsync<KnowledgeExtractionException>(() => extractor.ExtractAsync(stream, ".pdf", null));
+        Assert.Equal("KNOWLEDGE_PDF_TOO_MANY_PAGES", exception.Code);
+
+        var invalid = new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
+        {
+            ["Knowledge:Extraction:MaxPdfPages"] = "0"
+        }).Build();
+        await using var invalidProvider = new ServiceCollection().AddKnowledgeServices(invalid).BuildServiceProvider();
+        Assert.Throws<OptionsValidationException>(() => invalidProvider.GetRequiredService<IOptions<KnowledgeExtractionLimits>>().Value);
+    }
+
+    [Fact]
+    public async Task KnowledgeServicesStartupValidationPassesWithoutTheSectionAndFailsOnBadValues()
+    {
+        // IStartupValidator 是 ValidateOnStart 注册的、宿主（API 与 Worker）启动时执行的校验入口；这里不启动宿主，直接调用它。
+        static ServiceProvider Build(params (string Key, string Value)[] values) => new ServiceCollection()
+            .AddKnowledgeServices(new ConfigurationBuilder()
+                .AddInMemoryCollection(values.ToDictionary(item => item.Key, item => (string?)item.Value)).Build())
+            .BuildServiceProvider();
+
+        // 配置节缺失：使用默认值，启动校验通过，解析器可以解析出来。
+        await using var absent = Build();
+        absent.GetRequiredService<IStartupValidator>().Validate();
+        Assert.IsType<BasicDocumentTextExtractor>(absent.GetRequiredService<IDocumentTextExtractor>());
+
+        // 超出允许范围：启动校验失败。
+        await using var outOfRange = Build(("Knowledge:Extraction:ParseTimeoutSeconds", "0"));
+        Assert.Throws<OptionsValidationException>(() => outOfRange.GetRequiredService<IStartupValidator>().Validate());
+
+        // 不是数字：绑定阶段就失败，同样发生在启动校验里，不会带着默认值继续运行。
+        await using var notANumber = Build(("Knowledge:Extraction:MaxImagePixels", "many"));
+        Assert.ThrowsAny<Exception>(() => notANumber.GetRequiredService<IStartupValidator>().Validate());
+    }
+
+    [Fact]
+    public void IngestLeaseDefaultsToFiveMinutesAndRejectsOutOfRangeConfiguration()
+    {
+        static IConfiguration Configuration(string? value) => new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?> { ["Knowledge:Ingest:LeaseSeconds"] = value }).Build();
+
+        Assert.Equal(TimeSpan.FromSeconds(300), KnowledgeIngestWorker.ResolveLease(new ConfigurationBuilder().Build()));
+        Assert.Equal(TimeSpan.FromSeconds(300), KnowledgeIngestWorker.ResolveLease(Configuration(" ")));
+        Assert.Equal(TimeSpan.FromSeconds(120), KnowledgeIngestWorker.ResolveLease(Configuration("120")));
+        Assert.Equal(TimeSpan.FromSeconds(30), KnowledgeIngestWorker.ResolveLease(Configuration("30")));
+        Assert.Equal(TimeSpan.FromSeconds(3600), KnowledgeIngestWorker.ResolveLease(Configuration("3600")));
+        foreach (var invalid in new[] { "29", "3601", "0", "-5", "abc", "1.5" })
+            Assert.Throws<InvalidOperationException>(() => KnowledgeIngestWorker.ResolveLease(Configuration(invalid)));
+    }
+
+    [Fact]
+    public async Task PdfWithinDefaultLimitsStillExtractsTextPerPage()
+    {
+        await using var stream = new MemoryStream(BuildTextPdf(3));
+
+        var result = await new BasicDocumentTextExtractor().ExtractAsync(stream, ".pdf", "application/pdf");
+
+        Assert.Equal("text", result.ContentKind);
+        Assert.Equal(3, result.PageCount);
+        Assert.Equal(900, result.CharacterCount);
+        Assert.Contains(result.Segments, item => item.Location!.StartsWith("page:1;", StringComparison.Ordinal));
+        Assert.Contains(result.Segments, item => item.Location!.StartsWith("page:3;", StringComparison.Ordinal));
+        Assert.False(result.Truncated);
+    }
+
+    [Fact]
+    public async Task PdfOverPageLimitIsRejectedBeforeAnyPageIsParsed()
+    {
+        var pdf = BuildTextPdf(3);
+        var visited = new List<int>();
+        var extractor = new BasicDocumentTextExtractor(new KnowledgeExtractionLimits { MaxPdfPages = 2 })
+        {
+            BeforePdfPage = page => { lock (visited) visited.Add(page); }
+        };
+        await using var stream = new MemoryStream(pdf);
+
+        var exception = await Assert.ThrowsAsync<KnowledgeExtractionException>(() => extractor.ExtractAsync(stream, ".pdf", null));
+
+        Assert.Equal("KNOWLEDGE_PDF_TOO_MANY_PAGES", exception.Code);
+        Assert.False(exception.Retryable);
+        Assert.Contains("2", exception.Message, StringComparison.Ordinal);
+        Assert.Empty(visited);
+
+        // 页数恰好等于上限时照常解析。
+        var atLimit = new BasicDocumentTextExtractor(new KnowledgeExtractionLimits { MaxPdfPages = 3 });
+        await using var accepted = new MemoryStream(pdf);
+        Assert.Equal(3, (await atLimit.ExtractAsync(accepted, ".pdf", null)).PageCount);
+    }
+
+    [Fact]
+    public async Task PdfStopsParsingAsSoonAsCumulativeCharactersExceedTheLimit()
+    {
+        // 每页 300 字符、共 40 页；上限 450：第 1 页累计 300 未超，第 2 页累计 600 超限，之后的 38 页不应被解析。
+        var pdf = BuildTextPdf(40);
+        var visited = new List<int>();
+        var extractor = new BasicDocumentTextExtractor(new KnowledgeExtractionLimits { MaxCharacters = 450 })
+        {
+            BeforePdfPage = page => { lock (visited) visited.Add(page); }
+        };
+        await using var stream = new MemoryStream(pdf);
+
+        var exception = await Assert.ThrowsAsync<KnowledgeExtractionException>(() => extractor.ExtractAsync(stream, ".pdf", null));
+
+        Assert.Equal("KNOWLEDGE_CONTENT_TOO_LARGE", exception.Code);
+        Assert.False(exception.Retryable);
+        Assert.Equal([1, 2], visited);
+
+        // 累计恰好等于上限时不算超限。
+        var exact = new BasicDocumentTextExtractor(new KnowledgeExtractionLimits { MaxCharacters = 900 });
+        await using var accepted = new MemoryStream(BuildTextPdf(3));
+        Assert.Equal(900, (await exact.ExtractAsync(accepted, ".pdf", null)).CharacterCount);
+    }
+
+    [Fact]
+    public async Task PdfParseTimeoutReturnsTimeoutCodeWithoutBlockingLaterExtractionsAndParsesNoFurtherPage()
+    {
+        // 预热：进程内第一次打开 PDF 较慢，先解析一次，让下面的超时落在「卡在第 1 页」而不是加载阶段。
+        await using (var warmup = new MemoryStream(BuildTextPdf(1)))
+            await new BasicDocumentTextExtractor().ExtractAsync(warmup, ".pdf", null);
+        using var release = new ManualResetEventSlim(false);
+        var visited = new List<int>();
+        var limits = new KnowledgeExtractionLimits();
+        var extractor = new BasicDocumentTextExtractor(limits)
+        {
+            ParseTimeoutOverride = TimeSpan.FromMilliseconds(500),
+            // 第 1 页之前卡住解析线程，模拟一个在超时内解析不完的文件。
+            BeforePdfPage = page => { lock (visited) visited.Add(page); if (page == 1) release.Wait(TimeSpan.FromSeconds(30)); }
+        };
+        await using var stream = new MemoryStream(BuildTextPdf(3));
+        var started = System.Diagnostics.Stopwatch.StartNew();
+
+        var exception = await Assert.ThrowsAsync<KnowledgeExtractionException>(() => extractor.ExtractAsync(stream, ".pdf", null));
+
+        Assert.Equal("KNOWLEDGE_PARSE_TIMEOUT", exception.Code);
+        Assert.False(exception.Retryable);
+        Assert.True(started.Elapsed < TimeSpan.FromSeconds(10), $"超时应在设定时间附近返回，实际 {started.Elapsed}。");
+
+        // 被放弃的解析线程仍卡着时，后续解析不受影响。
+        await using var later = new MemoryStream(Encoding.UTF8.GetBytes("# Product\nfacts"));
+        Assert.Equal(2, (await new BasicDocumentTextExtractor(limits).ExtractAsync(later, ".md", null)).Segments.Count);
+
+        // 放开后，被放弃的解析在下一页之前看到取消并停止：第 2、3 页不会被解析。
+        // （极慢的机器上超时可能先于第 1 页触发，此时一页都不解析，同样满足。）
+        release.Set();
+        await Task.Delay(300);
+        lock (visited) Assert.DoesNotContain(visited, page => page > 1);
+    }
+
+    [Fact]
+    public async Task CallerCancellationDuringPdfParsePropagatesAsCancellationNotAsParseFailureOrTimeout()
+    {
+        using var shutdown = new CancellationTokenSource();
+        var visited = new List<int>();
+        var extractor = new BasicDocumentTextExtractor
+        {
+            // 解析第 1 页之前模拟宿主关机。
+            BeforePdfPage = page => { lock (visited) visited.Add(page); if (page == 1) shutdown.Cancel(); }
+        };
+        await using var stream = new MemoryStream(BuildTextPdf(3));
+
+        var exception = await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+            extractor.ExtractAsync(stream, ".pdf", null, shutdown.Token));
+
+        Assert.True(shutdown.IsCancellationRequested);
+        Assert.IsNotType<KnowledgeExtractionException>(exception.InnerException);
+        await Task.Delay(300);
+        lock (visited) Assert.Equal([1], visited);
+    }
+
+    [Fact]
+    public async Task DocxWithinDefaultLimitsAndAlreadyCancelledCallsBehaveAsBefore()
+    {
+        var extractor = new BasicDocumentTextExtractor(new KnowledgeExtractionLimits());
+        await using var stream = new MemoryStream(CreateDocx("Heading", "Product facts"));
+        Assert.Equal(2, (await extractor.ExtractAsync(stream, ".docx", null)).Segments.Count);
+
+        using var cancelled = new CancellationTokenSource();
+        cancelled.Cancel();
+        await using var again = new MemoryStream(CreateDocx("Heading", "Product facts"));
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => extractor.ExtractAsync(again, ".docx", null, cancelled.Token));
+    }
+
+    [Fact]
     public async Task EmbeddingAdapterBatchesAndRestoresResponseOrder()
     {
         var handler = new RecordingHandler(_ => JsonResponse("{\"data\":[{\"index\":1,\"embedding\":[2,3,4]},{\"index\":0,\"embedding\":[1,2,3]}]}"));
@@ -290,6 +518,11 @@ public sealed class KnowledgeAdapterTests
             if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
         }
     }
+
+    /// <summary>每页 3 行 × 100 个字母（共 300 字符）的多页文字 PDF，由测试代码生成。</summary>
+    private static byte[] BuildTextPdf(int pages)
+        => BasicDocumentTextExtractorImageTests.BuildPdf(
+            Enumerable.Range(0, pages).Select(BasicDocumentTextExtractorImageTests.TextPage).ToArray());
 
     private static byte[] CreateDocx(string heading, string paragraph)
     {

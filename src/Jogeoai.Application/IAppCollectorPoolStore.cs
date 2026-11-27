@@ -36,13 +36,18 @@ public interface IAppCollectorPoolStore
 
     /// <summary>
     /// 登记或更新节点上报的绑定，按（节点、设备、平台）识别。账号代号已属于另一个绑定的那一条被拒绝并写审计事件，其余照常处理。
-    /// 上报 ok 只解除设备离线、版本不一致、契约未审阅这三种停止；其余停止原因要由运营恢复。没有出现在上报里的绑定保持不变。
+    /// 新登记的绑定一律是 stopped / disabled_by_operator 且未批准（迁移 052），上报的健康状态不能让它生效，要由运营调用恢复接口批准；
+    /// 未批准的绑定之后的上报也保持这个状态。节点已登记的不同设备数达到它的上限时，新设备的绑定被拒绝（device_limit_exceeded），不入库。
+    /// 已批准的绑定：上报 ok 只解除设备离线、版本不一致、契约未审阅、契约变更这几种停止；其余停止原因要由运营恢复。没有出现在上报里的绑定保持不变。
     /// </summary>
     /// <param name="command">上报内容。</param>
     /// <param name="cancellationToken">取消令牌。</param>
     Task<AppBindingReportResult> ReportBindingsAsync(AppBindingReportCommand command, CancellationToken cancellationToken = default);
 
-    /// <summary>运营恢复一个已停止的绑定（任何停止原因）；冷却不受影响。绑定没有停止时返回 false；不存在时返回 404 APP_BINDING_NOT_FOUND。</summary>
+    /// <summary>
+    /// 运营恢复一个已停止的绑定（任何停止原因）；冷却不受影响。恢复同时就是批准：还没有批准过的绑定在这里记下批准时间，
+    /// 已批准的绑定再次停用、恢复时批准时间不变。绑定已是 active 且已批准时返回 false；不存在时返回 404 APP_BINDING_NOT_FOUND。
+    /// </summary>
     /// <param name="bindingId">绑定标识。</param>
     /// <param name="operatorUserId">执行操作的运营人员，写入审计事件。</param>
     /// <param name="cancellationToken">取消令牌。</param>
@@ -60,13 +65,19 @@ public interface IAppCollectorPoolStore
     /// 选任务时为这一个检测预留一次的积分（已有预留的不重复预留）；租户的可用积分不够一次检测的任务不领取并记下原因。
     /// 同一台设备（节点 + 虚机）尝试过的任务不再派给它。上一次租约已过期、既没有结果也没有失败上报的任务视同那一次尝试失败：
     /// 记一次失败后由本次领取的设备以新的租约版本接手，没有次数上限。
+    /// 还没有被运营批准的绑定按已停止处理（binding_stopped），不管它的状态列是什么；它的请求不写入任何内容：
+    /// 不刷新它的最近出现时间，不写事件，也不会给等待中的任务写下“绑定已停止”的原因。
     /// 绑定不存在或不属于该节点时返回 403 APP_BINDING_FORBIDDEN 并写审计事件。
     /// </summary>
     /// <param name="command">领取请求。</param>
     /// <param name="cancellationToken">取消令牌。</param>
     Task<AppLeaseResult> LeaseAsync(AppLeaseCommand command, CancellationToken cancellationToken = default);
 
-    /// <summary>续租：节点、任务、租约版本都匹配且租约未过期时延长租约并把任务置为采集中；否则返回 409 STALE_LEASE。</summary>
+    /// <summary>
+    /// 续租：节点、任务、租约版本都匹配且租约未过期时延长租约并把任务置为采集中；否则返回 409 STALE_LEASE。
+    /// 新的截止时间取“现在 + 延长秒数”“领取时刻 + 总时长上限（AppChannel:MaxLeaseTotalSeconds，默认 1800 秒）”“任务的截止时点”三者中最早的一个；
+    /// 领取已超过总时长上限，或任务已过截止时点时，同样返回 409 STALE_LEASE，租约不再延长。
+    /// </summary>
     /// <param name="command">续租请求。</param>
     /// <param name="cancellationToken">取消令牌。</param>
     /// <returns>新的租约截止时间。</returns>
@@ -74,7 +85,8 @@ public interface IAppCollectorPoolStore
 
     /// <summary>
     /// 处理一次分类失败：绑定停止或冷却、平台暂停、任务重新排队或进入终态。
-    /// 入口只在该平台所有没有被运营停用的绑定都因 App 拒绝模拟器而停止时才置为不可用。
+    /// 还没有被运营批准的绑定的上报不生效：不写审计事件，不改绑定、任务和平台，不计入验证熔断；响应与“租约已不是当前租约”的上报相同。
+    /// 入口只在该平台所有已批准、没有被运营停用的绑定都因 App 拒绝模拟器而停止时才置为不可用；验证熔断只统计已批准的绑定。
     /// 任务的去向不取决于发送状态，也没有失败次数上限：失败只结束这一次尝试，任务回到队列等另一台设备（需要登录时绑定停止，任务同样回到队列）。
     /// 只有需要人工验证、App 拒绝模拟器和频率受限使任务进入终态：对应的检测立即置为未采集，它预留的积分在同一事务里释放。
     /// </summary>

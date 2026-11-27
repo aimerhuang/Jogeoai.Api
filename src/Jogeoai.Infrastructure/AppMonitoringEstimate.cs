@@ -21,8 +21,12 @@ internal static class AppMonitoringEstimate
     /// </summary>
     internal sealed record BrandPrompts(IReadOnlyList<BrandPrompt> Prompts, bool TooLarge);
 
-    /// <summary>A draft App cell: its platform and the anchor it will have once saved (kept when already enabled, else tomorrow).</summary>
-    internal sealed record AppCell(string Engine, DateOnly Anchor);
+    /// <summary>
+    /// A draft App cell: its platform and the anchor it will have once saved (kept when already enabled, else today).
+    /// <see cref="Instant"/>: the cell is newly enabled by the draft, so its first cycle starts at once through an instant slot
+    /// of the App plan (11-27-app-first-cycle-now) and its first result is expected now rather than at the next 09:11.
+    /// </summary>
+    internal sealed record AppCell(string Engine, DateOnly Anchor, bool Instant = false);
 
     /// <summary>Reads the brand's enabled prompts, their scopes, their text and the active operator exclusions.</summary>
     internal static async Task<BrandPrompts> BrandPromptsAsync(MySqlConnection c, MySqlTransaction? t, Guid tenantId, Guid siteId,
@@ -100,11 +104,10 @@ internal static class AppMonitoringEstimate
                 platform.Capacity.ExpectedUncollected));
             // One sample per check: the App cycle run always uses a sample count of 1.
             appChecks += platform.Scheduled * runs;
-            if (platform.Scheduled > 0 && AppCycleCalendar.NextCycleStart(cell.Anchor, nowUtc, zone) is { } next)
-            {
-                var slot = AppCycleCalendar.SlotUtc(next, zone);
+            if (platform.Scheduled > 0 && (cell.Instant ? nowUtc
+                    : AppCycleCalendar.NextCycleStart(cell.Anchor, nowUtc, zone) is { } next ? AppCycleCalendar.SlotUtc(next, zone)
+                    : (DateTimeOffset?)null) is { } slot)
                 if (firstResult is null || slot < firstResult) firstResult = slot;
-            }
         }
         var appCredits = appChecks * PromptMonitoringPricing.UnitPrice;
         var channels = new MonitoringEstimateChannels(

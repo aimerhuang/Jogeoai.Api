@@ -11,23 +11,26 @@ public sealed partial class AppCollectorPoolStore
     private const string AppChannel = AppChannelDefinition.CollectorChannel;
 
     private sealed record BindingRow(Guid Id, string NodeId, string DeviceId, string PlatformCode, string Status, string? StopReason,
-        bool CooldownDue, double CooldownRemaining);
+        bool CooldownDue, double CooldownRemaining, bool Approved);
 
     private sealed record PlatformRow(bool Paused);
 
     private const string BindingColumns = """
         BIN_TO_UUID(id), node_id, device_id, platform_code, status, stop_reason,
         (cooldown_until IS NOT NULL AND cooldown_until <= UTC_TIMESTAMP(6)),
-        COALESCE(GREATEST(0, TIMESTAMPDIFF(MICROSECOND, UTC_TIMESTAMP(6), cooldown_until) / 1000000), 0)
+        COALESCE(GREATEST(0, TIMESTAMPDIFF(MICROSECOND, UTC_TIMESTAMP(6), cooldown_until) / 1000000), 0),
+        approved_at IS NOT NULL
         """;
 
     /// <summary>
     /// 第一把锁：绑定行。绑定不存在或不属于该节点时返回空值。领取时锁住同一台设备上的全部绑定（按唯一索引的顺序），
     /// 这样同一台设备上的两个绑定不会同时通过“设备空闲”的检查；失败上报只锁自己这一行。
+    /// 读取绑定是否已被运营批准（迁移 052 的 approved_at），所以领取、发题回执、失败上报在未执行 052 的库上返回 503。
     /// </summary>
     private static async Task<BindingRow?> LockBindingAsync(MySqlConnection c, MySqlTransaction t, string nodeId, Guid bindingId,
         bool wholeDevice, CancellationToken ct)
     {
+        await AppChannelSchema.RequireBindingApprovalAsync(c, t, ct);
         var owner = await QuerySingleAsync(c, t, "SELECT node_id, device_id FROM collector_app_bindings WHERE id = UUID_TO_BIN(@id);", ct,
             ("@id", bindingId.ToString()));
         if (owner is null || !string.Equals(owner[0], nodeId, StringComparison.Ordinal)) return null;
@@ -36,7 +39,7 @@ public sealed partial class AppCollectorPoolStore
             WHERE {(wholeDevice ? "node_id = @node AND device_id = @device" : "id = UUID_TO_BIN(@id)")} FOR UPDATE;
             """, ct, ("@id", bindingId.ToString()), ("@node", owner[0]), ("@device", owner[1]));
         return rows.Select(row => new BindingRow(Guid.Parse(row[0]), row[1], row[2], row[3], row[4], row[5].Length == 0 ? null : row[5],
-            Flag(row[6]), ParseDouble(row[7]))).FirstOrDefault(row => row.Id == bindingId);
+            Flag(row[6]), ParseDouble(row[7]), Flag(row[8]))).FirstOrDefault(row => row.Id == bindingId);
     }
 
     /// <summary>绑定不存在、属于别的节点，或者传入的其实是网页账号的标识：写审计事件，返回同一个 403。</summary>
@@ -94,6 +97,14 @@ public sealed partial class AppCollectorPoolStore
             if (binding is null) return Reject<AppLeaseResult>(await ForbidBindingAsync(c, t, command.NodeId, command.BindingId, "leases", ct));
             var id = ("@id", (object)binding.Id.ToString());
 
+            // A binding the operator has not approved never leases (RF1 / RF3), whatever its status says: approval, not the
+            // status column, is what lets a binding work. Nothing is written for its request: no "seen now" (a binding an older
+            // build left active and unapproved must not stay "recently seen", and so count as usable capacity, just by asking
+            // for work; only its bindings report refreshes it, and that report puts it back to pending), no cooldown event,
+            // and no "binding stopped" reason on the waiting tasks ("why a task was not collected" is not written by a
+            // binding nobody approved).
+            if (!binding.Approved) return Empty(AppLeaseEmptyReason.BindingStopped, null);
+
             // 2. Seen now; an elapsed cooldown ends.
             await ExecuteAsync(c, t, """
                 UPDATE collector_app_bindings
@@ -104,7 +115,7 @@ public sealed partial class AppCollectorPoolStore
             if (binding.CooldownDue)
                 await InsertEventAsync(c, t, new AppEvent("cooldown_expired", NodeActor(command.NodeId), command.NodeId, binding.Id, binding.PlatformCode), ct);
 
-            // 3. Stopped, then cooling.
+            // 3. Stopped, then cooling (the binding is approved here).
             if (binding.Status != "active")
             {
                 await StampBindingStoppedAsync(c, t, binding.PlatformCode, ct);
@@ -341,15 +352,32 @@ public sealed partial class AppCollectorPoolStore
     {
         if (command.ExtendSeconds is < AppPoolRules.MinLeaseSeconds or > AppPoolRules.MaxLeaseSeconds)
             throw new CollectorStoreException("INVALID_LEASE", "extendSeconds 必须在 5 到 900 之间。", 400);
+        var maxTotal = appChannel?.Value.EffectiveMaxLeaseTotalSeconds() ?? AppPoolRules.DefaultMaxLeaseTotalSeconds;
         return InTransactionAsync(async (c, t, ct) =>
         {
             var task = ("@task", (object)command.TaskId.ToString());
-            var affected = await ExecuteAsync(c, t, $"""
-                UPDATE collector_tasks
-                SET lease_until = UTC_TIMESTAMP(6) + INTERVAL @seconds SECOND, status = 'collecting', updated_at = UTC_TIMESTAMP(6)
+            // The task row is locked first, on its own, so that the lock order stays task → device attempt whatever join
+            // order the optimizer picks for the update below (the failure and send reports take them in that order too).
+            var current = await QuerySingleAsync(c, t, $"""
+                SELECT 1 FROM collector_tasks
                 WHERE id = UUID_TO_BIN(@task) AND channel = '{AppChannel}' AND lease_owner = @owner AND lease_version = @version
-                  AND status IN ('leased', 'collecting') AND lease_until > UTC_TIMESTAMP(6);
-                """, ct, task, ("@seconds", command.ExtendSeconds), ("@owner", command.NodeId), ("@version", command.LeaseVersion));
+                  AND status IN ('leased', 'collecting') AND lease_until > UTC_TIMESTAMP(6)
+                FOR UPDATE;
+                """, ct, task, ("@owner", command.NodeId), ("@version", command.LeaseVersion));
+            // RF4. The new end is the earliest of: now + the extension, the moment the lease was taken + the total cap, and the
+            // task's deadline. A lease that is already past the cap, or a task past its deadline, is not extended at all: the
+            // answer is the same as for an expired lease and lease_until stays where it was, so the lease runs out on its own
+            // and the next lease of another device (or the deadline pass) takes the task from there.
+            var affected = current is null ? 0 : await ExecuteAsync(c, t, """
+                UPDATE collector_tasks task
+                JOIN collector_app_device_attempts a ON a.task_id = task.id AND a.lease_version = task.lease_version
+                SET task.lease_until = LEAST(UTC_TIMESTAMP(6) + INTERVAL @seconds SECOND, a.leased_at + INTERVAL @maxTotal SECOND,
+                                             COALESCE(task.deadline_at, UTC_TIMESTAMP(6) + INTERVAL @seconds SECOND)),
+                    task.status = 'collecting', task.updated_at = UTC_TIMESTAMP(6)
+                WHERE task.id = UUID_TO_BIN(@task) AND task.lease_version = @version
+                  AND a.leased_at + INTERVAL @maxTotal SECOND > UTC_TIMESTAMP(6)
+                  AND (task.deadline_at IS NULL OR task.deadline_at > UTC_TIMESTAMP(6));
+                """, ct, task, ("@seconds", command.ExtendSeconds), ("@maxTotal", maxTotal), ("@version", command.LeaseVersion));
             if (affected == 0) throw new CollectorStoreException("STALE_LEASE", "该任务的租约已不是当前租约。", 409);
             await ExecuteAsync(c, t, """
                 UPDATE collector_app_device_attempts a JOIN collector_tasks task ON task.id = a.task_id AND task.lease_version = a.lease_version
