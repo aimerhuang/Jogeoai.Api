@@ -77,17 +77,29 @@ curl -fsS http://127.0.0.1:5260/health/ready
 
 ### 2.4 网关（必须）
 
-API 只监听 `127.0.0.1`，需要在宿主机上放一个 TLS 网关转发到它。Caddy 示例（`/etc/caddy/Caddyfile`，自行替换域名和 IP）：
+API 只监听 `127.0.0.1`，需要在宿主机上放一个 TLS 网关转发到它。三组路径的放行方式不同（2026-11-27 确定）：
+
+| 路径 | 网关放行 | 应用层鉴权 |
+|---|---|---|
+| `/internal/collector/app/*`（App 采集节点） | **不限来源 IP**。采集电脑多、出口 IP 不固定，不做白名单 | 每个节点自己的令牌，可单独轮换和停用（见 3.1 节） |
+| `/internal/collector/*` 的其余路径（网页采集端） | 只放行网页采集电脑的出口 IP | 所有网页采集端共用的 `COLLECTOR_CHINA_SERVICE_TOKEN`，泄露后不能只吊销某一台，所以保留 IP 限制 |
+| `/api/*`、`/health/*` | 只放行前端服务器的 IP | 用户会话 |
+
+Caddy 示例（`/etc/caddy/Caddyfile`，自行替换域名和 IP）：
 
 ```
 api.example.com {
-    @collector path /internal/collector/*
-    handle @collector {
-        @allowed remote_ip <采集电脑出口 IP …>
+    handle /internal/collector/app/* {
+        reverse_proxy 127.0.0.1:5260
+    }
+    handle /internal/collector/* {
+        @allowed remote_ip <网页采集电脑出口 IP …>
         handle @allowed {
             reverse_proxy 127.0.0.1:5260
         }
-        respond 403
+        handle {
+            respond 403
+        }
     }
     @api path /api/* /health/*
     handle @api {
@@ -95,13 +107,21 @@ api.example.com {
         handle @allowed {
             reverse_proxy 127.0.0.1:5260
         }
-        respond 403
+        handle {
+            respond 403
+        }
     }
-    respond 404
+    handle {
+        respond 404
+    }
 }
 ```
 
 这只是示例，未在真实服务器上验证。`/swagger`、`/openapi` 不要对外开放。如果要开放 `/mcp`，单独加规则（应用层用 MCP 令牌鉴权）。
+
+- **App 采集接口要在网关上限流。** 这组接口对公网开放后，应用内没有任何频率限制：每个带令牌的请求都会查一次数据库，请求体解析早于鉴权，`results` 的请求体最大可到 1 MiB。Caddy 限流需要额外插件，Nginx 自带 `limit_req`。
+- 不使用网页采集时，把 `COLLECTOR_CHINA_SERVICE_TOKEN` 留空，网页通道的领取和提交接口一律返回 401，网关上那一段可以直接改成 `respond 403`。
+- 网页采集电脑的出口 IP 也不固定时，可以把那一段同样改成直接转发，风险高于 App 通道，原因见上表。
 
 ### 2.5 迁移已有数据 / 执行新迁移
 
@@ -255,7 +275,7 @@ launchctl bootout gui/$(id -u)/com.aivc.app-node   # 停止
 
 1. **应用安全问题**：2026-11 的内部安全审计结论是当前代码不宜直接开放公网，需要先修复审计列出的高优先级问题（审计报告不在公开仓库中）。网络白名单和网关不能替代这些修复。
 2. **反向代理链**：API 尚未处理 `X-Forwarded-*`，经网关后限流会把所有用户当作同一个 IP；需要在应用中按实际拓扑配置受信代理。
-3. **网关与 TLS**：按 2.4 节配置并实测白名单生效；`/swagger`、`/openapi` 不对外。
+3. **网关与 TLS**：按 2.4 节配置并实测：`/api/*` 与网页采集路径的白名单生效；App 采集路径在请求体合法、不带令牌或带错误令牌时返回 401，网关限流生效；`/swagger`、`/openapi` 不对外。应用内对 App 采集接口的限流还没有做。
 4. **备份**：MySQL 与知识库数据卷的每日备份和异地保存。
 5. **采集电脑联调**：多台电脑、多台模拟器同时连生产后端还没有实测过；先接一台电脑有人值守试跑，再逐台增加。
 
